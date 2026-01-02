@@ -1,0 +1,26 @@
+# makepkg generated directories and files
+linux-ntfs/
+pkg/
+src/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+
+# Editor and OS files
+*~
+*.swp
+.DS_Store
+
+# Build artifacts
+*.o
+*.o.d
+*.o.cmd
+*.o.tmp
+*.ko
+*.ko.*
+*.mod
+*.mod.c
+.tmp_versions/
+*.cmd
+modules.order
+Module.symvers

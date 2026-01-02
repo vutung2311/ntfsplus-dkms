@@ -1,0 +1,7 @@
+PACKAGE_NAME="ntfsplus"
+PACKAGE_VERSION="@VERSION@"
+BUILT_MODULE_NAME[0]="ntfsplus"
+DEST_MODULE_LOCATION[0]="/kernel/fs/ntfsplus"
+AUTOINSTALL="yes"
+MAKE[0]="make default KDIR=/lib/modules/\${kernelver}/build"
+CLEAN="make clean KDIR=/lib/modules/\${kernelver}/build"
