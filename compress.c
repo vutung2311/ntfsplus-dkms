@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
  * NTFS kernel compressed attributes handling.
- * Part of the Linux-NTFS project.
  *
  * Copyright (c) 2001-2004 Anton Altaparmakov
  * Copyright (c) 2002 Richard Russon
  * Copyright (c) 2025 LG Electronics Co., Ltd.
  *
- * Part of this file is based on code from the NTFS-3G project.
+ * Part of this file is based on code from the NTFS-3G.
  * and is copyrighted by the respective authors below:
  * Copyright (c) 2004-2005 Anton Altaparmakov
  * Copyright (c) 2004-2006 Szabolcs Szakacsits
@@ -25,13 +24,11 @@
 #include "inode.h"
 #include "debug.h"
 #include "ntfs.h"
-#include "malloc.h"
-#include "aops.h"
 #include "lcnalloc.h"
 #include "mft.h"
 
-/**
- * enum of constants used in the compression code
+/*
+ * Constants used in the compression code
  */
 enum {
 	/* Token types and access mask. */
@@ -53,17 +50,17 @@ enum {
 	NTFS_MAX_CB_SIZE	= 64 * 1024,
 };
 
-/**
+/*
  * ntfs_compression_buffer - one buffer for the decompression engine
  */
 static u8 *ntfs_compression_buffer;
 
-/**
+/*
  * ntfs_cb_lock - mutex lock which protects ntfs_compression_buffer
  */
 static DEFINE_MUTEX(ntfs_cb_lock);
 
-/**
+/*
  * allocate_compression_buffers - allocate the decompression buffers
  *
  * Caller has to hold the ntfs_lock mutex.
@@ -81,7 +78,7 @@ int allocate_compression_buffers(void)
 	return 0;
 }
 
-/**
+/*
  * free_compression_buffers - free the decompression buffers
  *
  * Caller has to hold the ntfs_lock mutex.
@@ -99,8 +96,10 @@ void free_compression_buffers(void)
 	mutex_unlock(&ntfs_cb_lock);
 }
 
-/**
+/*
  * zero_partial_compressed_page - zero out of bounds compressed page region
+ * @page: page to zero
+ * @initialized_size: initialized size of the attribute
  */
 static void zero_partial_compressed_page(struct page *page,
 		const s64 initialized_size)
@@ -117,8 +116,11 @@ static void zero_partial_compressed_page(struct page *page,
 	memset(kp + kp_ofs, 0, PAGE_SIZE - kp_ofs);
 }
 
-/**
+/*
  * handle_bounds_compressed_page - test for&handle out of bounds compressed page
+ * @page: page to check and handle
+ * @i_size: file size
+ * @initialized_size: initialized size of the attribute
  */
 static inline void handle_bounds_compressed_page(struct page *page,
 		const loff_t i_size, const s64 initialized_size)
@@ -128,7 +130,7 @@ static inline void handle_bounds_compressed_page(struct page *page,
 		zero_partial_compressed_page(page, initialized_size);
 }
 
-/**
+/*
  * ntfs_decompress - decompress a compression block into an array of pages
  * @dest_pages:		destination array of pages
  * @completed_pages:	scratch space to track completed pages
@@ -440,7 +442,7 @@ return_overflow:
 	goto return_error;
 }
 
-/**
+/*
  * ntfs_read_compressed_block - read a compressed block into the page cache
  * @folio:	locked folio in the compression block(s) we need to read
  *
@@ -485,14 +487,14 @@ int ntfs_read_compressed_block(struct folio *folio)
 	s64 end_vcn = ((((s64)(index + 1UL) << PAGE_SHIFT) + cb_size - 1)
 			& ~cb_size_mask) >> vol->cluster_size_bits;
 	/* Number of compression blocks (cbs) in the wanted vcn range. */
-	unsigned int nr_cbs = NTFS_CLU_TO_B(vol, end_vcn - start_vcn) >>
-		ni->itype.compressed.block_size_bits;
+	unsigned int nr_cbs = ntfs_cluster_to_bytes(vol, end_vcn - start_vcn) >>
+			ni->itype.compressed.block_size_bits;
 	/*
 	 * Number of pages required to store the uncompressed data from all
 	 * compression blocks (cbs) overlapping @page. Due to alignment
 	 * guarantees of start_vcn and end_vcn, no need to round up here.
 	 */
-	unsigned int nr_pages = NTFS_CLU_TO_PIDX(vol, end_vcn - start_vcn);
+	unsigned int nr_pages = ntfs_cluster_to_pidx(vol, end_vcn - start_vcn);
 	unsigned int xpage, max_page, cur_page, cur_ofs, i, page_ofs, page_index;
 	unsigned int cb_clusters, cb_max_ofs;
 	int cb_max_page, err = 0;
@@ -527,7 +529,7 @@ int ntfs_read_compressed_block(struct folio *folio)
 	 * We have already been given one page, this is the one we must do.
 	 * Once again, the alignment guarantees keep it simple.
 	 */
-	offset = NTFS_CLU_TO_PIDX(vol, start_vcn);
+	offset = ntfs_cluster_to_pidx(vol, start_vcn);
 	xpage = index - offset;
 	pages[xpage] = page;
 	/*
@@ -638,8 +640,8 @@ lock_retry_remap:
 			goto map_rl_err;
 		}
 
-		page_ofs = NTFS_CLU_TO_POFS(vol, lcn);
-		page_index = NTFS_CLU_TO_PIDX(vol, lcn);
+		page_ofs = ntfs_cluster_to_poff(vol, lcn);
+		page_index = ntfs_cluster_to_pidx(vol, lcn);
 
 		lpage = read_mapping_page(sb->s_bdev->bd_mapping,
 					  page_index, NULL);
@@ -888,10 +890,15 @@ err_out:
 /* log base 2 of the number of entries in the hash table for match-finding.  */
 #define HASH_SHIFT		14
 
-/* Constant for the multiplicative hash function.  */
+/*
+ * Constant for the multiplicative hash function. These hashing constants
+ * are used solely for the match-finding algorithm during compression.
+ * They are NOT part of the on-disk format. The decompressor does not
+ * utilize this hash.
+ */
 #define HASH_MULTIPLIER		0x1E35A7BD
 
-struct COMPRESS_CONTEXT {
+struct compress_context {
 	const unsigned char *inbuf;
 	int bufsize;
 	int size;
@@ -949,7 +956,7 @@ static inline unsigned int ntfs_hash(const u8 *p)
  *          position, it ends early and returns the longest match found so far.
  *          This saves a lot of time on degenerate inputs.
  */
-static void ntfs_best_match(struct COMPRESS_CONTEXT *pctx, const int i,
+static void ntfs_best_match(struct compress_context *pctx, const int i,
 		int best_len)
 {
 	const u8 * const inbuf = pctx->inbuf;
@@ -1052,7 +1059,7 @@ out:
 /*
  * Advance the match-finder, but don't search for matches.
  */
-static void ntfs_skip_position(struct COMPRESS_CONTEXT *pctx, const int i)
+static void ntfs_skip_position(struct compress_context *pctx, const int i)
 {
 	unsigned int hash;
 
@@ -1082,7 +1089,7 @@ static void ntfs_skip_position(struct COMPRESS_CONTEXT *pctx, const int i)
 static unsigned int ntfs_compress_block(const char *inbuf, const int bufsize,
 		char *outbuf)
 {
-	struct COMPRESS_CONTEXT *pctx;
+	struct compress_context *pctx;
 	int i; /* current position */
 	int j; /* end of best match from current position */
 	int k; /* end of best match from next position */
@@ -1097,7 +1104,7 @@ static unsigned int ntfs_compress_block(const char *inbuf, const int bufsize,
 	int tag;    /* current value of tag */
 	int ntag;   /* count of bits still undefined in tag */
 
-	pctx = ntfs_malloc_nofs(sizeof(struct COMPRESS_CONTEXT));
+	pctx = kvzalloc(sizeof(struct compress_context), GFP_NOFS);
 	if (!pctx)
 		return -ENOMEM;
 
@@ -1260,7 +1267,7 @@ static unsigned int ntfs_compress_block(const char *inbuf, const int bufsize,
 	 * Free the compression context and return the total number of bytes
 	 * written to 'outbuf'.
 	 */
-	ntfs_free(pctx);
+	kvfree(pctx);
 	return xout;
 }
 
@@ -1367,8 +1374,8 @@ static int ntfs_write_cb(struct ntfs_inode *ni, loff_t pos, struct page **pages,
 		bio_size = insz;
 	}
 
-	new_vcn = NTFS_B_TO_CLU(vol, pos & ~(ni->itype.compressed.block_size - 1));
-	new_length = NTFS_B_TO_CLU(vol, round_up(bio_size, vol->cluster_size));
+	new_vcn = ntfs_bytes_to_cluster(vol, pos & ~(ni->itype.compressed.block_size - 1));
+	new_length = ntfs_bytes_to_cluster(vol, round_up(bio_size, vol->cluster_size));
 
 	err = ntfs_non_resident_attr_punch_hole(ni, new_vcn, ni->itype.compressed.block_clusters);
 	if (err < 0)
@@ -1390,7 +1397,7 @@ static int ntfs_write_cb(struct ntfs_inode *ni, loff_t pos, struct page **pages,
 		err = PTR_ERR(rl);
 		if (ntfs_cluster_free_from_rl(vol, rlc))
 			ntfs_error(vol->sb, "Failed to free hot clusters.");
-		ntfs_free(rlc);
+		kvfree(rlc);
 		goto out;
 	}
 
@@ -1421,7 +1428,8 @@ setup_bio:
 			bio = bio_alloc(vol->sb->s_bdev, 1, REQ_OP_WRITE,
 					GFP_NOIO);
 			bio->bi_iter.bi_sector =
-				NTFS_B_TO_SECTOR(vol, NTFS_CLU_TO_B(vol, bio_lcn + i));
+				ntfs_bytes_to_sector(vol,
+						ntfs_cluster_to_bytes(vol, bio_lcn + i));
 		}
 
 		if (!bio_add_page(bio, pages[i], page_size, 0)) {
@@ -1465,6 +1473,16 @@ int ntfs_compress_write(struct ntfs_inode *ni, loff_t pos, size_t count,
 	int i, ip;
 	size_t written = 0;
 	struct address_space *mapping = VFS_I(ni)->i_mapping;
+
+	if (NInoCompressed(ni) && pos + count > ni->allocated_size) {
+		int err;
+		loff_t end = pos + count;
+
+		err = ntfs_attr_expand(ni, end,
+				round_up(end, ni->itype.compressed.block_size));
+		if (err)
+			return err;
+	}
 
 	pages = kmalloc_array(pages_per_cb, sizeof(struct page *), GFP_NOFS);
 	if (!pages)

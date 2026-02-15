@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * NTFS kernel directory operations. Part of the Linux-NTFS project.
+ * NTFS kernel directory operations.
  *
  * Copyright (c) 2001-2007 Anton Altaparmakov
  * Copyright (c) 2002 Richard Russon
@@ -15,13 +15,15 @@
 #include "index.h"
 #include "reparse.h"
 
-/**
+#include <linux/filelock.h>
+
+/*
  * The little endian Unicode string $I30 as a global constant.
  */
 __le16 I30[5] = { cpu_to_le16('$'), cpu_to_le16('I'),
 		cpu_to_le16('3'),	cpu_to_le16('0'), 0 };
 
-/**
+/*
  * ntfs_lookup_inode_by_name - find an inode in a directory given its name
  * @dir_ni:	ntfs inode of the directory in which to search for the name
  * @uname:	Unicode name for which to search in the directory
@@ -557,8 +559,8 @@ found_it2:
 			 * If vcn is in the same page cache page as old_vcn we
 			 * recycle the mapped page.
 			 */
-			if (NTFS_CLU_TO_PIDX(vol, old_vcn) ==
-			    NTFS_CLU_TO_PIDX(vol, vcn))
+			if (ntfs_cluster_to_pidx(vol, old_vcn) ==
+			    ntfs_cluster_to_pidx(vol, vcn))
 				goto fast_descend_into_child_node;
 			kfree(kaddr);
 			kaddr = NULL;
@@ -599,7 +601,7 @@ dir_err_out:
 	goto err_out;
 }
 
-/**
+/*
  * ntfs_filldir - ntfs specific filldir method
  * @vol:	current ntfs volume
  * @ndir:	ntfs inode of current directory
@@ -928,13 +930,14 @@ nextdir:
 		}
 
 		if (ie_pos < actor->pos) {
-			ie_pos += next->length;
+			ie_pos += le16_to_cpu(next->length);
 			continue;
 		}
 
 		actor->pos = ie_pos;
 
-		index = NTFS_MFT_NR_TO_PIDX(vol, MREF_LE(next->data.dir.indexed_file));
+		index = ntfs_mft_no_to_pidx(vol,
+				MREF_LE(next->data.dir.indexed_file));
 		if (nir) {
 			struct ntfs_index_ra *cnir;
 			struct rb_node *node = ra_root.rb_node;
@@ -1005,7 +1008,7 @@ filldir:
 			private->key_length = next->key_length;
 			break;
 		}
-		ie_pos += next->length;
+		ie_pos += le16_to_cpu(next->length);
 	}
 
 	if (!err)
@@ -1066,7 +1069,7 @@ int ntfs_check_empty_dir(struct ntfs_inode *ni, struct mft_record *ni_mrec)
 	}
 
 	/* Non-empty directory? */
-	if (ctx->attr->data.resident.value_length !=
+	if (le32_to_cpu(ctx->attr->data.resident.value_length) !=
 	    sizeof(struct index_root) + sizeof(struct index_entry_header)) {
 		/* Both ENOTEMPTY and EEXIST are ok. We use the more common. */
 		ret = -ENOTEMPTY;
@@ -1078,7 +1081,7 @@ int ntfs_check_empty_dir(struct ntfs_inode *ni, struct mft_record *ni_mrec)
 	return ret;
 }
 
-/**
+/*
  * ntfs_dir_open - called when an inode is about to be opened
  * @vi:		inode to be opened
  * @filp:	file structure describing the inode
@@ -1113,7 +1116,7 @@ static int ntfs_dir_release(struct inode *vi, struct file *filp)
 	return 0;
 }
 
-/**
+/*
  * ntfs_dir_fsync - sync a directory to disk
  * @filp:	file describing the directory to be synced
  * @start:	start offset to be synced
@@ -1154,7 +1157,7 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 	if (!ctx)
 		return -ENOMEM;
 
-	mutex_lock_nested(&ni->mrec_lock, NTFS_INODE_MUTEX_NORMAL_2);
+	mutex_lock_nested(&ni->mrec_lock, NTFS_INODE_MUTEX_NORMAL_CHILD);
 	while (!(err = ntfs_attr_lookup(AT_FILE_NAME, NULL, 0, 0, 0, NULL, 0, ctx))) {
 		struct file_name_attr *fn = (struct file_name_attr *)((u8 *)ctx->attr +
 				le16_to_cpu(ctx->attr->data.resident.value_offset));
@@ -1165,7 +1168,7 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 		parent_vi = ntfs_iget(vi->i_sb, MREF_LE(fn->parent_directory));
 		if (IS_ERR(parent_vi))
 			continue;
-		mutex_lock_nested(&NTFS_I(parent_vi)->mrec_lock, NTFS_INODE_MUTEX_PARENT_2);
+		mutex_lock_nested(&NTFS_I(parent_vi)->mrec_lock, NTFS_INODE_MUTEX_NORMAL);
 		ia_vi = ntfs_index_iget(parent_vi, I30, 4);
 		mutex_unlock(&NTFS_I(parent_vi)->mrec_lock);
 		if (IS_ERR(ia_vi)) {
@@ -1229,4 +1232,5 @@ const struct file_operations ntfs_dir_ops = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= ntfs_compat_ioctl,
 #endif
+	.setlease	= generic_setlease,
 };

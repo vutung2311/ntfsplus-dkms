@@ -9,9 +9,7 @@
 #include <linux/writeback.h>
 #include <linux/seq_file.h>
 
-#include "compat.h"
 #include "lcnalloc.h"
-#include "malloc.h"
 #include "time.h"
 #include "ntfs.h"
 #include "index.h"
@@ -20,8 +18,9 @@
 #include "ea.h"
 #include "attrib.h"
 #include "iomap.h"
+#include "object_id.h"
 
-/**
+/*
  * ntfs_test_inode - compare two (possibly fake) inodes for equality
  * @vi:		vfs inode which to test
  * @data:	data which is being tested with
@@ -39,13 +38,11 @@
  */
 int ntfs_test_inode(struct inode *vi, void *data)
 {
-	struct ntfs_attr *na = (struct ntfs_attr *)data;
-	struct ntfs_inode *ni;
+	struct ntfs_attr *na = data;
+	struct ntfs_inode *ni = NTFS_I(vi);
 
 	if (vi->i_ino != na->mft_no)
 		return 0;
-
-	ni = NTFS_I(vi);
 
 	/* If !NInoAttr(ni), @vi is a normal file or directory inode. */
 	if (likely(!NInoAttr(ni))) {
@@ -69,7 +66,7 @@ int ntfs_test_inode(struct inode *vi, void *data)
 	return 1;
 }
 
-/**
+/*
  * ntfs_init_locked_inode - initialize an inode
  * @vi:		vfs inode to initialize
  * @data:	data which to initialize @vi to
@@ -89,7 +86,7 @@ int ntfs_test_inode(struct inode *vi, void *data)
  */
 static int ntfs_init_locked_inode(struct inode *vi, void *data)
 {
-	struct ntfs_attr *na = (struct ntfs_attr *)data;
+	struct ntfs_attr *na = data;
 	struct ntfs_inode *ni = NTFS_I(vi);
 
 	vi->i_ino = na->mft_no;
@@ -136,7 +133,7 @@ static int ntfs_read_locked_attr_inode(struct inode *base_vi, struct inode *vi);
 static int ntfs_read_locked_index_inode(struct inode *base_vi,
 		struct inode *vi);
 
-/**
+/*
  * ntfs_iget - obtain a struct inode corresponding to a specific normal inode
  * @sb:		super block of mounted volume
  * @mft_no:	mft record number / inode number to obtain
@@ -186,7 +183,7 @@ struct inode *ntfs_iget(struct super_block *sb, unsigned long mft_no)
 	return vi;
 }
 
-/**
+/*
  * ntfs_attr_iget - obtain a struct inode corresponding to an attribute
  * @base_vi:	vfs base inode containing the attribute
  * @type:	attribute type
@@ -247,7 +244,7 @@ struct inode *ntfs_attr_iget(struct inode *base_vi, __le32 type,
 	return vi;
 }
 
-/**
+/*
  * ntfs_index_iget - obtain a struct inode corresponding to an index
  * @base_vi:	vfs base inode containing the index related attributes
  * @name:	Unicode name of the index
@@ -365,7 +362,7 @@ static int ntfs_non_resident_dealloc_clusters(struct ntfs_inode *ni)
 			if (err)
 				ntfs_error(sb,
 					   "Failed to free attribute clusters. Leaving inconsistent metadata.\n");
-			ntfs_free(rl);
+			kvfree(rl);
 		}
 	}
 
@@ -403,9 +400,8 @@ int ntfs_drop_big_inode(struct inode *inode)
 				spin_lock(&inode->i_lock);
 				atomic_dec(&inode->i_count);
 			}
-			return 0;
-		} else if (ni->type == AT_INDEX_ROOT)
-			return 0;
+		}
+		return 0;
 	}
 
 	return inode_generic_drop(inode);
@@ -446,7 +442,7 @@ static struct lock_class_key attr_list_inode_mrec_lock_class;
  */
 static struct lock_class_key attr_list_rl_lock_class;
 
-/**
+/*
  * __ntfs_init_inode - initialize ntfs specific part of an inode
  * @sb:		super block of mounted volume
  * @ni:		freshly allocated ntfs inode which to initialize
@@ -465,7 +461,6 @@ void __ntfs_init_inode(struct super_block *sb, struct ntfs_inode *ni)
 	atomic_set(&ni->count, 1);
 	ni->vol = NTFS_SB(sb);
 	ntfs_init_runlist(&ni->runlist);
-	ni->lcn_seek_trunc = LCN_RL_NOT_MAPPED;
 	mutex_init(&ni->mrec_lock);
 	if (ni->type == AT_ATTRIBUTE_LIST) {
 		lockdep_set_class(&ni->mrec_lock,
@@ -521,7 +516,7 @@ inline struct ntfs_inode *ntfs_new_extent_inode(struct super_block *sb,
 	return ni;
 }
 
-/**
+/*
  * ntfs_is_extended_system_file - check if a file is in the $Extend directory
  * @ctx:	initialized attribute search context
  *
@@ -530,6 +525,8 @@ inline struct ntfs_inode *ntfs_new_extent_inode(struct super_block *sb,
  * directory.
  *
  * Return values:
+ *	   3: file is $ObjId in $Extend directory
+ *	   2: file is $Reparse in $Extend directory
  *	   1: file is in $Extend directory
  *	   0: file is not in $Extend directory
  *    -errno: failed to determine if the file is in the $Extend directory
@@ -597,6 +594,10 @@ err_corrupt_attr:
 				ntfs_attr_name_free(&s);
 				return 2; /* it's reparse point file */
 			}
+			if (!strcmp("$ObjId", s)) {
+				ntfs_attr_name_free(&s);
+				return 3; /* it's object id file */
+			}
 			ntfs_attr_name_free(&s);
 			return 1;	/* YES, it's an extended system file. */
 		}
@@ -634,13 +635,14 @@ void ntfs_set_vfs_operations(struct inode *inode, mode_t mode, dev_t dev)
 			inode->i_op = &ntfs_file_inode_ops;
 			inode->i_fop = &ntfs_file_ops;
 		}
-		inode->i_mapping->a_ops = &ntfs_aops;
+		if (inode->i_ino == FILE_MFT)
+			inode->i_mapping->a_ops = &ntfs_mft_aops;
+		else
+			inode->i_mapping->a_ops = &ntfs_aops;
 	}
 }
 
-__le16 R[3] = { cpu_to_le16('$'), cpu_to_le16('R'), 0 };
-
-/**
+/*
  * ntfs_read_locked_inode - read an inode from its device
  * @vi:		inode to read
  *
@@ -827,7 +829,7 @@ static int ntfs_read_locked_inode(struct inode *vi)
 			ntfs_error(vi->i_sb, "Attr_list_size is zero");
 			goto unm_err_out;
 		}
-		ni->attr_list = ntfs_malloc_nofs(ni->attr_list_size);
+		ni->attr_list = kvzalloc(ni->attr_list_size, GFP_NOFS);
 		if (!ni->attr_list) {
 			ntfs_error(vi->i_sb,
 				"Not enough memory to allocate buffer for attribute list.");
@@ -1068,11 +1070,16 @@ view_index_meta:
 			 */
 			extend_sys = ntfs_is_extended_system_file(ctx);
 			if (extend_sys > 0) {
-				if (m->flags & MFT_RECORD_IS_VIEW_INDEX &&
-				    extend_sys == 2) {
-					name = R;
-					name_len = 2;
-					goto view_index_meta;
+				if (m->flags & MFT_RECORD_IS_VIEW_INDEX) {
+					if (extend_sys == 2) {
+						name = reparse_index_name;
+						name_len = 2;
+						goto view_index_meta;
+					} else if (extend_sys == 3) {
+						name = objid_index_name;
+						name_len = 2;
+						goto view_index_meta;
+					}
 				}
 				goto no_data_attr_special_case;
 			}
@@ -1225,7 +1232,7 @@ err_out:
 	return err;
 }
 
-/**
+/*
  * ntfs_read_locked_attr_inode - read an attribute inode from its base inode
  * @base_vi:	base inode
  * @vi:		attribute inode to read
@@ -1452,7 +1459,7 @@ err_out:
 	return err;
 }
 
-/**
+/*
  * ntfs_read_locked_index_inode - read an index inode from its base inode
  * @base_vi:	base inode
  * @vi:		index inode to read
@@ -1709,15 +1716,15 @@ err_out:
 	return err;
 }
 
-/**
+/*
  * load_attribute_list_mount - load an attribute list into memory
  * @vol:		ntfs volume from which to read
- * @runlist:		runlist of the attribute list
+ * @rl:			runlist of the attribute list
  * @al_start:		destination buffer
  * @size:		size of the destination buffer in bytes
  * @initialized_size:	initialized size of the attribute list
  *
- * Walk the runlist @runlist and load all clusters from it copying them into
+ * Walk the runlist @rl and load all clusters from it copying them into
  * the linear buffer @al. The maximum number of bytes copied to @al is @size
  * bytes. Note, @size does not need to be a multiple of the cluster size. If
  * @initialized_size is less than @size, the region in @al between
@@ -1758,13 +1765,14 @@ static int load_attribute_list_mount(struct ntfs_volume *vol,
 			goto err_out;
 		}
 
-		rl_byte_off = NTFS_CLU_TO_B(vol, lcn);
-		rl_byte_len = NTFS_CLU_TO_B(vol, rl->length);
+		rl_byte_off = ntfs_cluster_to_bytes(vol, lcn);
+		rl_byte_len = ntfs_cluster_to_bytes(vol, rl->length);
 
 		if (al + rl_byte_len > al_end)
 			rl_byte_len = al_end - al;
 
-		err = ntfs_dev_read(sb, al, rl_byte_off, rl_byte_len);
+		err = ntfs_bdev_read(sb->s_bdev, al, rl_byte_off,
+				   round_up(rl_byte_len, SECTOR_SIZE));
 		if (err) {
 			ntfs_error(sb, "Cannot read attribute list.");
 			goto err_out;
@@ -1791,6 +1799,7 @@ err_out:
 	err = -EIO;
 	goto done;
 }
+
 /*
  * The MFT inode has special locking, so teach the lock validator
  * about this by splitting off the locking rules of the MFT from
@@ -1800,7 +1809,7 @@ err_out:
  */
 static struct lock_class_key mft_ni_runlist_lock_key, mft_ni_mrec_lock_key;
 
-/**
+/*
  * ntfs_read_inode_mount - special read_inode for mount time use only
  * @vi:		inode to read
  *
@@ -1831,7 +1840,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 	s64 next_vcn, last_vcn, highest_vcn;
 	struct super_block *sb = vi->i_sb;
 	struct ntfs_volume *vol = NTFS_SB(sb);
-	struct ntfs_inode *ni;
+	struct ntfs_inode *ni = NTFS_I(vi);
 	struct mft_record *m = NULL;
 	struct attr_record *a;
 	struct ntfs_attr_search_ctx *ctx;
@@ -1844,7 +1853,6 @@ int ntfs_read_inode_mount(struct inode *vi)
 	/* Initialize the ntfs specific part of @vi. */
 	ntfs_init_big_inode(vi);
 
-	ni = NTFS_I(vi);
 
 	/* Setup the data attribute. It is special as it is mst protected. */
 	NInoSetNonResident(ni);
@@ -1874,19 +1882,20 @@ int ntfs_read_inode_mount(struct inode *vi)
 	if (i < sb->s_blocksize)
 		i = sb->s_blocksize;
 
-	m = (struct mft_record *)ntfs_malloc_nofs(i);
+	m = kzalloc(i, GFP_NOFS);
 	if (!m) {
 		ntfs_error(sb, "Failed to allocate buffer for $MFT record 0.");
 		goto err_out;
 	}
 
 	/* Determine the first block of the $MFT/$DATA attribute. */
-	nr_blocks = NTFS_B_TO_SECTOR(vol, vol->mft_record_size);
+	nr_blocks = ntfs_bytes_to_sector(vol, vol->mft_record_size);
 	if (!nr_blocks)
 		nr_blocks = 1;
 
 	/* Load $MFT/$DATA's first mft record. */
-	err = ntfs_dev_read(sb, m, NTFS_CLU_TO_B(vol, vol->mft_lcn), i);
+	err = ntfs_bdev_read(sb->s_bdev, (char *)m,
+			     ntfs_cluster_to_bytes(vol, vol->mft_lcn), i);
 	if (err) {
 		ntfs_error(sb, "Device read failed.");
 		goto err_out;
@@ -1913,7 +1922,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 	vi->i_generation = ni->seq_no = le16_to_cpu(m->sequence_number);
 
 	/* Provides read_folio() for map_mft_record(). */
-	vi->i_mapping->a_ops = &ntfs_aops;
+	vi->i_mapping->a_ops = &ntfs_mft_aops;
 
 	ctx = ntfs_attr_get_search_ctx(ni, m);
 	if (!ctx) {
@@ -1960,7 +1969,8 @@ int ntfs_read_inode_mount(struct inode *vi)
 			ntfs_error(sb, "Attr_list_size is zero");
 			goto put_err_out;
 		}
-		ni->attr_list = ntfs_malloc_nofs(ni->attr_list_size);
+		ni->attr_list = kvzalloc(round_up(ni->attr_list_size, SECTOR_SIZE),
+					 GFP_NOFS);
 		if (!ni->attr_list) {
 			ntfs_error(sb, "Not enough memory to allocate buffer for attribute list.");
 			goto put_err_out;
@@ -1987,7 +1997,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 
 			err = load_attribute_list_mount(vol, rl, ni->attr_list, ni->attr_list_size,
 					le64_to_cpu(a->data.non_resident.initialized_size));
-			ntfs_free(rl);
+			kvfree(rl);
 			if (err) {
 				ntfs_error(sb,
 					   "Failed to load attribute list with error code %i.",
@@ -2102,7 +2112,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 				goto put_err_out;
 			}
 			/* Get the last vcn in the $DATA attribute. */
-			last_vcn = NTFS_B_TO_CLU(vol,
+			last_vcn = ntfs_bytes_to_cluster(vol,
 					le64_to_cpu(a->data.non_resident.allocated_size));
 			/* Fill in the inode size. */
 			vi->i_size = le64_to_cpu(a->data.non_resident.data_size);
@@ -2141,7 +2151,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 				ntfs_error(sb, "ntfs_read_inode() of $MFT failed.\n");
 				ntfs_attr_put_search_ctx(ctx);
 				/* Revert to the safe super operations. */
-				ntfs_free(m);
+				kfree(m);
 				return -1;
 			}
 			/*
@@ -2189,7 +2199,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 	}
 	ntfs_attr_put_search_ctx(ctx);
 	ntfs_debug("Done.");
-	ntfs_free(m);
+	kfree(m);
 
 	/*
 	 * Split the locking rules of the MFT inode from the
@@ -2207,7 +2217,7 @@ put_err_out:
 	ntfs_attr_put_search_ctx(ctx);
 err_out:
 	ntfs_error(sb, "Failed. Marking inode as bad.");
-	ntfs_free(m);
+	kfree(m);
 	return -1;
 }
 
@@ -2215,18 +2225,18 @@ static void __ntfs_clear_inode(struct ntfs_inode *ni)
 {
 	/* Free all alocated memory. */
 	if (NInoNonResident(ni) && ni->runlist.rl) {
-		ntfs_free(ni->runlist.rl);
+		kvfree(ni->runlist.rl);
 		ni->runlist.rl = NULL;
 	}
 
 	if (ni->attr_list) {
-		ntfs_free(ni->attr_list);
+		kvfree(ni->attr_list);
 		ni->attr_list = NULL;
 	}
 
 	if (ni->name_len && ni->name != I30 &&
 	    ni->name != reparse_index_name &&
-	    ni->name != R) {
+	    ni->name != objid_index_name) {
 		WARN_ON(!ni->name);
 		kfree(ni->name);
 	}
@@ -2272,7 +2282,7 @@ static int ntfs_delete_base_inode(struct ntfs_inode *ni)
 	return err;
 }
 
-/**
+/*
  * ntfs_evict_big_inode - clean up the ntfs specific part of an inode
  * @vi:		vfs inode pending annihilation
  *
@@ -2318,7 +2328,7 @@ void ntfs_evict_big_inode(struct inode *vi)
 				ntfs_clear_extent_inode(ni->ext.extent_ntfs_inos[i]);
 		}
 		ni->nr_extents = 0;
-		ntfs_free(ni->ext.extent_ntfs_inos);
+		kvfree(ni->ext.extent_ntfs_inos);
 	}
 
 release:
@@ -2339,10 +2349,10 @@ release:
 	if (ni->folio)
 		folio_put(ni->folio);
 	kfree(ni->mrec);
-	ntfs_free(ni->target);
+	kvfree(ni->target);
 }
 
-/**
+/*
  * ntfs_show_options - show mount options in /proc/mounts
  * @sf:		seq_file in which to write our mount options
  * @root:	root of the mounted tree whose mount options to display
@@ -2397,7 +2407,7 @@ int ntfs_show_options(struct seq_file *sf, struct dentry *root)
 }
 
 int ntfs_extend_initialized_size(struct inode *vi, const loff_t offset,
-		const loff_t new_size)
+				 const loff_t new_size, bool bsync)
 {
 	struct ntfs_inode *ni = NTFS_I(vi);
 	loff_t old_init_size;
@@ -2420,10 +2430,14 @@ int ntfs_extend_initialized_size(struct inode *vi, const loff_t offset,
 	if (!NInoCompressed(ni) && old_init_size < offset) {
 		err = iomap_zero_range(vi, old_init_size,
 				       offset - old_init_size,
-				       NULL, &ntfs_read_iomap_ops,
+				       NULL, &ntfs_seek_iomap_ops,
 				       &ntfs_iomap_folio_ops, NULL);
 		if (err)
 			return err;
+		if (bsync)
+			err = filemap_write_and_wait_range(vi->i_mapping,
+							   old_init_size,
+							   offset - 1);
 	}
 
 
@@ -2450,7 +2464,7 @@ int ntfs_truncate_vfs(struct inode *vi, loff_t new_size, loff_t i_size)
 	return 0;
 }
 
-/**
+/*
  * ntfs_inode_sync_standard_information - update standard information attribute
  * @vi:	inode to update standard information
  * @m:	mft record
@@ -2531,7 +2545,7 @@ static int ntfs_inode_sync_standard_information(struct inode *vi, struct mft_rec
 	 * and the base mft record may actually not have been modified so it
 	 * might not need to be written out.
 	 * NOTE: It is not a problem when the inode for $MFT itself is being
-	 * written out as mark_ntfs_record_dirty() will only set I_DIRTY_PAGES
+	 * written out as ntfs_mft_mark_dirty() will only set I_DIRTY_PAGES
 	 * on the $MFT inode and hence ntfs_write_inode() will not be
 	 * re-invoked because of it which in turn is ok since the dirtied mft
 	 * record will be cleaned and written out to disk below, i.e. before
@@ -2544,7 +2558,7 @@ static int ntfs_inode_sync_standard_information(struct inode *vi, struct mft_rec
 	return err;
 }
 
-/**
+/*
  * ntfs_inode_sync_filename - update FILE_NAME attributes
  * @ni:	ntfs inode to update FILE_NAME attributes
  *
@@ -2706,7 +2720,7 @@ int ntfs_get_block_mft_record(struct ntfs_inode *mft_ni, struct ntfs_inode *ni)
 	return 0;
 }
 
-/**
+/*
  * __ntfs_write_inode - write out a dirty inode
  * @vi:		inode to write out
  * @sync:	if true, write out synchronously
@@ -2874,7 +2888,7 @@ err_out:
 	return err;
 }
 
-/**
+/*
  * ntfs_extent_inode_open - load an extent inode and attach it to its base
  * @base_ni:	base ntfs inode
  * @mref:	mft reference of the extent inode to load (in little endian)
@@ -2957,13 +2971,13 @@ static struct ntfs_inode *ntfs_extent_inode_open(struct ntfs_inode *base_ni,
 	if (!(base_ni->nr_extents & 3)) {
 		i = (base_ni->nr_extents + 4) * sizeof(struct ntfs_inode *);
 
-		extent_nis = ntfs_malloc_nofs(i);
+		extent_nis = kvzalloc(i, GFP_NOFS);
 		if (!extent_nis)
 			goto err_out;
 		if (base_ni->nr_extents) {
 			memcpy(extent_nis, base_ni->ext.extent_ntfs_inos,
 					i - 4 * sizeof(struct ntfs_inode *));
-			ntfs_free(base_ni->ext.extent_ntfs_inos);
+			kvfree(base_ni->ext.extent_ntfs_inos);
 		}
 		base_ni->ext.extent_ntfs_inos = extent_nis;
 	}
@@ -2978,7 +2992,7 @@ err_out:
 	goto out;
 }
 
-/**
+/*
  * ntfs_inode_attach_all_extents - attach all extents for target inode
  * @ni:		opened ntfs inode for which perform attach
  *
@@ -3024,7 +3038,7 @@ int ntfs_inode_attach_all_extents(struct ntfs_inode *ni)
 	return 0;
 }
 
-/**
+/*
  * ntfs_inode_add_attrlist - add attribute list to inode and fill it
  * @ni: opened ntfs inode to which add attribute list
  *
@@ -3075,7 +3089,7 @@ int ntfs_inode_add_attrlist(struct ntfs_inode *ni)
 				ctx->attr->name_length + 7) & ~7;
 		al_len += ale_size;
 
-		aln = ntfs_realloc_nofs(al, al_len, al_len-ale_size);
+		aln = kvrealloc(al, al_len, GFP_NOFS);
 		if (!aln) {
 			err = -ENOMEM;
 			ntfs_error(ni->vol->sb, "Failed to realloc %d bytes", al_len);
@@ -3198,12 +3212,12 @@ rollback:
 put_err_out:
 	ntfs_attr_put_search_ctx(ctx);
 err_out:
-	ntfs_free(al);
+	kvfree(al);
 	unmap_mft_record(ni);
 	return err;
 }
 
-/**
+/*
  * ntfs_inode_close - close an ntfs inode and free all associated memory
  * @ni:		ntfs inode to close
  *
@@ -3247,28 +3261,23 @@ int ntfs_inode_close(struct ntfs_inode *ni)
 				(base_ni->nr_extents - i - 1) *
 				sizeof(struct ntfs_inode *));
 		/* Buffer should be for multiple of four extents. */
-		if ((--base_ni->nr_extents) & 3) {
-			i = -1;
+		if ((--base_ni->nr_extents) & 3)
 			break;
-		}
 		/*
 		 * ElectricFence is unhappy with realloc(x,0) as free(x)
 		 * thus we explicitly separate these two cases.
 		 */
 		if (base_ni->nr_extents) {
 			/* Resize the memory buffer. */
-			tmp_nis = ntfs_realloc_nofs(tmp_nis, base_ni->nr_extents *
-					sizeof(struct ntfs_inode *), base_ni->nr_extents *
-					sizeof(struct ntfs_inode *));
+			tmp_nis = kvrealloc(tmp_nis, base_ni->nr_extents *
+					sizeof(struct ntfs_inode *), GFP_NOFS);
 			/* Ignore errors, they don't really matter. */
 			if (tmp_nis)
 				base_ni->ext.extent_ntfs_inos = tmp_nis;
 		} else if (tmp_nis) {
-			ntfs_free(tmp_nis);
+			kvfree(tmp_nis);
 			base_ni->ext.extent_ntfs_inos = NULL;
 		}
-		/* Allow for error checking. */
-		i = -1;
 		break;
 	}
 
@@ -3276,7 +3285,7 @@ int ntfs_inode_close(struct ntfs_inode *ni)
 		ntfs_error(ni->vol->sb, "Releasing dirty inode %lld!\n",
 				(long long)ni->mft_no);
 	if (NInoAttrList(ni) && ni->attr_list)
-		ntfs_free(ni->attr_list);
+		kvfree(ni->attr_list);
 	ntfs_destroy_ext_inode(ni);
 	err = 0;
 	ntfs_debug("\n");
@@ -3295,7 +3304,7 @@ void ntfs_destroy_ext_inode(struct ntfs_inode *ni)
 		ntfs_error(ni->vol->sb, "Releasing dirty ext inode %lld!\n",
 				(long long)ni->mft_no);
 	if (NInoAttrList(ni) && ni->attr_list)
-		ntfs_free(ni->attr_list);
+		kvfree(ni->attr_list);
 	kfree(ni->mrec);
 	kmem_cache_free(ntfs_inode_cache, ni);
 }
@@ -3341,7 +3350,7 @@ static int ntfs_attr_position(__le32 type, struct ntfs_attr_search_ctx *ctx)
 	return 0;
 }
 
-/**
+/*
  * ntfs_inode_free_space - free space in the MFT record of inode
  * @ni:		ntfs inode in which MFT record free space
  * @size:	amount of space needed to free
@@ -3614,15 +3623,11 @@ static s64 __ntfs_inode_resident_attr_pwrite(struct inode *vi,
 			   ni->type, err);
 		goto out;
 	}
-	if (!folio_test_uptodate(folio)) {
-		u32 len = le32_to_cpu(ctx->attr->data.resident.value_length);
-
-		memcpy_to_folio(folio, 0, addr, len);
-		folio_zero_segment(folio, offset_in_folio(folio, len),
-				   folio_size(folio) - len);
-	} else {
+	if (!folio_test_uptodate(folio))
+		folio_fill_tail(folio, 0, addr,
+				le32_to_cpu(ctx->attr->data.resident.value_length));
+	else
 		memcpy_to_folio(folio, offset_in_folio(folio, pos), buf, count);
-	}
 	folio_mark_uptodate(folio);
 	folio_unlock(folio);
 	folio_put(folio);
@@ -3685,8 +3690,8 @@ static s64 __ntfs_inode_non_resident_attr_pwrite(struct inode *vi,
 			s64 vcn;
 			struct runlist_element *rl;
 
-			lcn_count = max_t(s64, 1, NTFS_B_TO_CLU(vol, attr_len));
-			vcn = NTFS_PIDX_TO_CLU(vol, folio->index);
+			lcn_count = max_t(s64, 1, ntfs_bytes_to_cluster(vol, attr_len));
+			vcn = ntfs_pidx_to_cluster(vol, folio->index);
 
 			do {
 				down_write(&ni->runlist.lock);
@@ -3714,11 +3719,12 @@ static s64 __ntfs_inode_non_resident_attr_pwrite(struct inode *vi,
 				bio = bio_alloc(vol->sb->s_bdev, 1, REQ_OP_WRITE,
 						GFP_NOIO);
 				bio->bi_iter.bi_sector =
-					NTFS_B_TO_SECTOR(vol, NTFS_CLU_TO_B(vol, lcn) +
-							 lcn_folio_off);
+					ntfs_bytes_to_sector(vol,
+							ntfs_cluster_to_bytes(vol, lcn) +
+							lcn_folio_off);
 
 				length = min_t(unsigned long,
-					       NTFS_CLU_TO_B(vol, rl_length),
+					       ntfs_cluster_to_bytes(vol, rl_length),
 					       folio_size(folio));
 				if (!bio_add_folio(bio, folio, length, offset)) {
 					ret = -EIO;
@@ -3791,4 +3797,24 @@ s64 ntfs_inode_attr_pwrite(struct inode *vi, s64 pos, s64 count, u8 *buf, bool s
 out:
 	ntfs_attr_put_search_ctx(ctx);
 	return ret;
+}
+
+struct folio *ntfs_get_locked_folio(struct address_space *mapping,
+		pgoff_t index, pgoff_t end_index, struct file_ra_state *ra)
+{
+	struct folio *folio;
+
+	folio = filemap_lock_folio(mapping, index);
+	if (IS_ERR(folio)) {
+		if (PTR_ERR(folio) != -ENOENT)
+			return folio;
+
+		page_cache_sync_readahead(mapping, ra, NULL, index,
+				end_index - index);
+		folio = read_mapping_folio(mapping, index, NULL);
+		if (!IS_ERR(folio))
+			folio_lock(folio);
+	}
+
+	return folio;
 }

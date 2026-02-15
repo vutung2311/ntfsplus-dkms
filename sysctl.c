@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Code for sysctl handling in NTFS Linux kernel driver. Part of
- * the Linux-NTFS project. Adapted from the old NTFS driver,
+ * Code for sysctl handling in NTFS Linux kernel driver.
  *
  * Copyright (C) 1997 Martin von Löwis, Régis Duchesne
  * Copyright (c) 2002-2005 Anton Altaparmakov
@@ -22,7 +21,7 @@
 /* Definition of the ntfs sysctl. */
 static const struct ctl_table ntfs_sysctls[] = {
 	{
-		.procname	= "ntfs-debug",
+		.procname	= "ntfsplus-debug",
 		.data		= &debug_msgs,		/* Data pointer and size. */
 		.maxlen		= sizeof(debug_msgs),
 		.mode		= 0644,			/* Mode, proc handler. */
@@ -34,7 +33,7 @@ static const struct ctl_table ntfs_sysctls[] = {
 /* Storage for the sysctls header. */
 static struct ctl_table_header *sysctls_root_table;
 
-/**
+/*
  * ntfs_sysctl - add or remove the debug sysctl
  * @add:	add (1) or remove (0) the sysctl
  *

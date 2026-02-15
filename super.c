@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * NTFS kernel super block handling. Part of the Linux-NTFS project.
+ * NTFS kernel super block handling.
  *
  * Copyright (c) 2001-2012 Anton Altaparmakov and Tuxera Inc.
  * Copyright (c) 2001,2002 Richard Russon
@@ -15,7 +15,6 @@
 #include <linux/fs_context.h>
 #include <linux/fs_parser.h>
 
-#include "uapi_ntfs.h"
 #include "sysctl.h"
 #include "logfile.h"
 #include "quota.h"
@@ -23,7 +22,7 @@
 #include "ntfs.h"
 #include "ea.h"
 #include "volume.h"
-#include "malloc.h"
+#include "compat.h"
 
 /* A global default upcase table and a corresponding reference count. */
 static __le16 *default_upcase;
@@ -197,11 +196,15 @@ static int ntfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			NVolClearCheckWindowsNames(vol);
 		break;
 	case Opt_acl:
+#ifdef CONFIG_NTFS_FS_POSIX_ACL
 		if (result.boolean)
 			fc->sb_flags |= SB_POSIXACL;
 		else
 			fc->sb_flags &= ~SB_POSIXACL;
 		break;
+#else
+		return -EINVAL;
+#endif
 	case Opt_discard:
 		if (result.boolean)
 			NVolSetDiscard(vol);
@@ -320,7 +323,7 @@ void ntfs_handle_error(struct super_block *sb)
 	}
 }
 
-/**
+/*
  * ntfs_write_volume_flags - write new flags to the volume information flags
  * @vol:	ntfs volume on which to modify the flags
  * @flags:	new flags value for the volume information flags
@@ -376,7 +379,7 @@ put_unm_err_out:
 	return err;
 }
 
-/**
+/*
  * ntfs_set_volume_flags - set bits in the volume information flags
  * @vol:	ntfs volume on which to modify the flags
  * @flags:	flags to set on the volume
@@ -391,7 +394,7 @@ int ntfs_set_volume_flags(struct ntfs_volume *vol, __le16 flags)
 	return ntfs_write_volume_flags(vol, vol->vol_flags | flags);
 }
 
-/**
+/*
  * ntfs_clear_volume_flags - clear bits in the volume information flags
  * @vol:	ntfs volume on which to modify the flags
  * @flags:	flags to clear on the volume
@@ -458,7 +461,7 @@ out:
 	return ret;
 }
 
-/**
+/*
  * is_boot_sector_ntfs - check whether a boot sector is a valid NTFS boot sector
  * @sb:		Super block of the device to which @b belongs.
  * @b:		Boot sector of device @sb to check.
@@ -541,7 +544,7 @@ not_ntfs:
 	return false;
 }
 
-/**
+/*
  * read_ntfs_boot_sector - read the NTFS boot sector of a device
  * @sb:		super block of device to read the boot sector from
  * @silent:	if true, suppress all output
@@ -553,11 +556,11 @@ static char *read_ntfs_boot_sector(struct super_block *sb,
 {
 	char *boot_sector;
 
-	boot_sector = ntfs_malloc_nofs(PAGE_SIZE);
+	boot_sector = kzalloc(PAGE_SIZE, GFP_NOFS);
 	if (!boot_sector)
 		return NULL;
 
-	if (ntfs_dev_read(sb, boot_sector, 0, PAGE_SIZE)) {
+	if (ntfs_bdev_read(sb->s_bdev, boot_sector, 0, PAGE_SIZE)) {
 		if (!silent)
 			ntfs_error(sb, "Unable to read primary boot sector.");
 		kfree(boot_sector);
@@ -575,7 +578,7 @@ static char *read_ntfs_boot_sector(struct super_block *sb,
 	return boot_sector;
 }
 
-/**
+/*
  * parse_ntfs_boot_sector - parse the boot sector and store the data in @vol
  * @vol:	volume structure to initialise with data from boot sector
  * @b:		boot sector to parse
@@ -758,7 +761,7 @@ static bool parse_ntfs_boot_sector(struct ntfs_volume *vol,
 	return true;
 }
 
-/**
+/*
  * ntfs_setup_allocators - initialize the cluster and mft allocators
  * @vol:	volume structure for which to setup the allocators
  *
@@ -834,7 +837,7 @@ static void ntfs_setup_allocators(struct ntfs_volume *vol)
 
 static struct lock_class_key mftmirr_runlist_lock_key,
 			     mftmirr_mrec_lock_key;
-/**
+/*
  * load_and_init_mft_mirror - load and setup the mft mirror inode for a volume
  * @vol:	ntfs super block describing device whose mft mirror to load
  *
@@ -887,7 +890,7 @@ static bool load_and_init_mft_mirror(struct ntfs_volume *vol)
 	return true;
 }
 
-/**
+/*
  * check_mft_mirror - compare contents of the mft mirror with the mft
  * @vol:	ntfs super block describing device whose mft mirror to check
  *
@@ -1016,8 +1019,10 @@ mft_unmap_out:
 	return true;
 }
 
-/**
+/*
  * load_and_check_logfile - load and check the logfile inode for a volume
+ * @vol: ntfs volume to load the logfile for
+ * @rp: on success, set to the restart page header
  *
  * Return 0 on success or errno on error.
  */
@@ -1045,7 +1050,7 @@ static int load_and_check_logfile(struct ntfs_volume *vol,
 
 #define NTFS_HIBERFIL_HEADER_SIZE	4096
 
-/**
+/*
  * check_windows_hibernation_status - check if Windows is suspended on a volume
  * @vol:	ntfs super block of device to check
  *
@@ -1150,7 +1155,7 @@ iput_out:
 	return ret;
 }
 
-/**
+/*
  * load_and_init_quota - load and setup the quota file for a volume if present
  * @vol:	ntfs super block describing device whose quota file to load
  *
@@ -1217,7 +1222,7 @@ static bool load_and_init_quota(struct ntfs_volume *vol)
 	return true;
 }
 
-/**
+/*
  * load_and_init_attrdef - load the attribute definitions table for a volume
  * @vol:	ntfs super block describing device whose attrdef to load
  *
@@ -1246,7 +1251,7 @@ static bool load_and_init_attrdef(struct ntfs_volume *vol)
 	i_size = i_size_read(ino);
 	if (i_size <= 0 || i_size > 0x7fffffff)
 		goto iput_failed;
-	vol->attrdef = (struct attr_def *)ntfs_malloc_nofs(i_size);
+	vol->attrdef = kvzalloc(i_size, GFP_NOFS);
 	if (!vol->attrdef)
 		goto iput_failed;
 	index = 0;
@@ -1274,7 +1279,7 @@ read_partial_attrdef_page:
 	iput(ino);
 	return true;
 free_iput_failed:
-	ntfs_free(vol->attrdef);
+	kvfree(vol->attrdef);
 	vol->attrdef = NULL;
 iput_failed:
 	iput(ino);
@@ -1283,7 +1288,7 @@ failed:
 	return false;
 }
 
-/**
+/*
  * load_and_init_upcase - load the upcase table for an ntfs volume
  * @vol:	ntfs super block describing device whose upcase to load
  *
@@ -1316,7 +1321,7 @@ static bool load_and_init_upcase(struct ntfs_volume *vol)
 	if (!i_size || i_size & (sizeof(__le16) - 1) ||
 			i_size > 64ULL * 1024 * sizeof(__le16))
 		goto iput_upcase_failed;
-	vol->upcase = (__le16 *)ntfs_malloc_nofs(i_size);
+	vol->upcase = kvzalloc(i_size, GFP_NOFS);
 	if (!vol->upcase)
 		goto iput_upcase_failed;
 	index = 0;
@@ -1339,7 +1344,7 @@ read_partial_upcase_page:
 		if (size)
 			goto read_partial_upcase_page;
 	}
-	vol->upcase_len = i_size >> UCHAR_T_SIZE_BITS;
+	vol->upcase_len = i_size >> sizeof(unsigned char);
 	ntfs_debug("Read %llu bytes from $UpCase (expected %zu bytes).",
 			i_size, 64 * 1024 * sizeof(__le16));
 	iput(ino);
@@ -1356,7 +1361,7 @@ read_partial_upcase_page:
 		if (vol->upcase[i] != default_upcase[i])
 			break;
 	if (i == max) {
-		ntfs_free(vol->upcase);
+		kvfree(vol->upcase);
 		vol->upcase = default_upcase;
 		vol->upcase_len = max;
 		ntfs_nr_upcase_users++;
@@ -1369,7 +1374,7 @@ read_partial_upcase_page:
 	return true;
 iput_upcase_failed:
 	iput(ino);
-	ntfs_free(vol->upcase);
+	kvfree(vol->upcase);
 	vol->upcase = NULL;
 upcase_failed:
 	mutex_lock(&ntfs_lock);
@@ -1394,7 +1399,7 @@ static struct lock_class_key
 	lcnbmp_runlist_lock_key, lcnbmp_mrec_lock_key,
 	mftbmp_runlist_lock_key, mftbmp_mrec_lock_key;
 
-/**
+/*
  * load_system_files - open the system files using normal functions
  * @vol:	ntfs super block describing device whose system files to load
  *
@@ -1575,7 +1580,7 @@ get_ctx_vol_failed:
 		NVolSetErrors(vol);
 	}
 
-	ntfs_free(rp);
+	kvfree(rp);
 	/* Get the root directory inode so we can do path lookups. */
 	vol->root_ino = ntfs_iget(sb, FILE_root);
 	if (IS_ERR(vol->root_ino)) {
@@ -1667,7 +1672,7 @@ iput_lcnbmp_err_out:
 iput_attrdef_err_out:
 	vol->attrdef_size = 0;
 	if (vol->attrdef) {
-		ntfs_free(vol->attrdef);
+		kvfree(vol->attrdef);
 		vol->attrdef = NULL;
 	}
 iput_upcase_err_out:
@@ -1679,7 +1684,7 @@ iput_upcase_err_out:
 	}
 	mutex_unlock(&ntfs_lock);
 	if (vol->upcase) {
-		ntfs_free(vol->upcase);
+		kvfree(vol->upcase);
 		vol->upcase = NULL;
 	}
 iput_mftbmp_err_out:
@@ -1694,7 +1699,7 @@ static void ntfs_volume_free(struct ntfs_volume *vol)
 	/* Throw away the table of attribute definitions. */
 	vol->attrdef_size = 0;
 	if (vol->attrdef) {
-		ntfs_free(vol->attrdef);
+		kvfree(vol->attrdef);
 		vol->attrdef = NULL;
 	}
 	vol->upcase_len = 0;
@@ -1709,7 +1714,7 @@ static void ntfs_volume_free(struct ntfs_volume *vol)
 	}
 
 	if (!ntfs_nr_upcase_users && default_upcase) {
-		ntfs_free(default_upcase);
+		kvfree(default_upcase);
 		default_upcase = NULL;
 	}
 
@@ -1717,7 +1722,7 @@ static void ntfs_volume_free(struct ntfs_volume *vol)
 
 	mutex_unlock(&ntfs_lock);
 	if (vol->upcase) {
-		ntfs_free(vol->upcase);
+		kvfree(vol->upcase);
 		vol->upcase = NULL;
 	}
 
@@ -1729,7 +1734,7 @@ static void ntfs_volume_free(struct ntfs_volume *vol)
 	kfree(vol);
 }
 
-/**
+/*
  * ntfs_put_super - called by the vfs to unmount a volume
  * @sb:		vfs superblock of volume to unmount
  */
@@ -1849,6 +1854,7 @@ static void ntfs_put_super(struct super_block *sb)
 
 	iput(vol->mft_ino);
 	vol->mft_ino = NULL;
+	blkdev_issue_flush(sb->s_bdev);
 
 	ntfs_volume_free(vol);
 }
@@ -1862,15 +1868,15 @@ int ntfs_force_shutdown(struct super_block *sb, u32 flags)
 		return 0;
 
 	switch (flags) {
-	case NTFS_GOING_DOWN_DEFAULT:
-	case NTFS_GOING_DOWN_FULLSYNC:
+	case FS_SHUTDOWN_FLAGS_DEFAULT:
+	case FS_SHUTDOWN_FLAGS_LOGFLUSH:
 		ret = bdev_freeze(sb->s_bdev);
 		if (ret)
 			return ret;
 		bdev_thaw(sb->s_bdev);
 		NVolSetShutdown(vol);
 		break;
-	case NTFS_GOING_DOWN_NOSYNC:
+	case FS_SHUTDOWN_FLAGS_NOLOGFLUSH:
 		NVolSetShutdown(vol);
 		break;
 	default:
@@ -1882,7 +1888,7 @@ int ntfs_force_shutdown(struct super_block *sb, u32 flags)
 
 static void ntfs_shutdown(struct super_block *sb)
 {
-	ntfs_force_shutdown(sb, NTFS_GOING_DOWN_NOSYNC);
+	ntfs_force_shutdown(sb, FS_SHUTDOWN_FLAGS_NOLOGFLUSH);
 
 }
 
@@ -1908,7 +1914,7 @@ static int ntfs_sync_fs(struct super_block *sb, int wait)
 	return err;
 }
 
-/**
+/*
  * get_nr_free_clusters - return the number of free clusters on a volume
  * @vol:	ntfs volume for which to obtain free cluster count
  *
@@ -1965,14 +1971,7 @@ s64 get_nr_free_clusters(struct ntfs_volume *vol)
 		 * Get folio from page cache, getting it from backing store
 		 * if necessary, and increment the use count.
 		 */
-		folio = filemap_lock_folio(mapping, index);
-		if (IS_ERR(folio)) {
-			page_cache_sync_readahead(mapping, ra, NULL,
-				index, max_index - index);
-			folio = read_mapping_folio(mapping, index, NULL);
-			if (!IS_ERR(folio))
-				folio_lock(folio);
-		}
+		folio = ntfs_get_locked_folio(mapping, index, max_index, ra);
 
 		/* Ignore pages which errored synchronously. */
 		if (IS_ERR(folio)) {
@@ -2043,7 +2042,7 @@ s64 ntfs_available_clusters_count(struct ntfs_volume *vol, s64 nr_clusters)
 	return nr_clusters;
 }
 
-/**
+/*
  * __get_nr_free_mft_records - return the number of free inodes on a volume
  * @vol:	ntfs volume for which to obtain free inode count
  * @nr_free:	number of mft records in filesystem
@@ -2086,14 +2085,7 @@ static unsigned long __get_nr_free_mft_records(struct ntfs_volume *vol,
 		 * Get folio from page cache, getting it from backing store
 		 * if necessary, and increment the use count.
 		 */
-		folio = filemap_lock_folio(mapping, index);
-		if (IS_ERR(folio)) {
-			page_cache_sync_readahead(mapping, ra, NULL,
-				index, max_index - index);
-			folio = read_mapping_folio(mapping, index, NULL);
-			if (!IS_ERR(folio))
-				folio_lock(folio);
-		}
+		folio = ntfs_get_locked_folio(mapping, index, max_index, ra);
 
 		/* Ignore pages which errored synchronously. */
 		if (IS_ERR(folio)) {
@@ -2130,7 +2122,7 @@ static unsigned long __get_nr_free_mft_records(struct ntfs_volume *vol,
 	return nr_free;
 }
 
-/**
+/*
  * ntfs_statfs - return information about mounted NTFS volume
  * @dentry:	dentry from mounted volume
  * @sfs:	statfs structure in which to return the information
@@ -2214,7 +2206,7 @@ static int ntfs_write_inode(struct inode *vi, struct writeback_control *wbc)
 	return __ntfs_write_inode(vi, wbc->sync_mode == WB_SYNC_ALL);
 }
 
-/**
+/*
  * The complete super operations.
  */
 static const struct super_operations ntfs_sops = {
@@ -2241,8 +2233,12 @@ static void precalc_free_clusters(struct work_struct *work)
 			nr_free);
 }
 
-/**
+static struct lock_class_key ntfs_mft_inval_lock_key;
+
+/*
  * ntfs_fill_super - mount an ntfs filesystem
+ * @sb: super block of the device to mount
+ * @fc: filesystem context containing mount options
  *
  * ntfs_fill_super() is called by the VFS to mount the device described by @sb
  * with the mount otions in @data with the NTFS filesystem.
@@ -2254,8 +2250,6 @@ static void precalc_free_clusters(struct work_struct *work)
  * expectedly return an error, but nobody wants to see error messages when in
  * fact this is what is supposed to happen.
  */
-static struct lock_class_key ntfs_mft_inval_lock_key;
-
 static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 {
 	char *boot;
@@ -2443,7 +2437,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 		/* Release the default upcase if it has no users. */
 		mutex_lock(&ntfs_lock);
 		if (!--ntfs_nr_upcase_users && default_upcase) {
-			ntfs_free(default_upcase);
+			kvfree(default_upcase);
 			default_upcase = NULL;
 		}
 		mutex_unlock(&ntfs_lock);
@@ -2502,7 +2496,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	/* Throw away the table of attribute definitions. */
 	vol->attrdef_size = 0;
 	if (vol->attrdef) {
-		ntfs_free(vol->attrdef);
+		kvfree(vol->attrdef);
 		vol->attrdef = NULL;
 	}
 	vol->upcase_len = 0;
@@ -2513,7 +2507,7 @@ static int ntfs_fill_super(struct super_block *sb, struct fs_context *fc)
 	}
 	mutex_unlock(&ntfs_lock);
 	if (vol->upcase) {
-		ntfs_free(vol->upcase);
+		kvfree(vol->upcase);
 		vol->upcase = NULL;
 	}
 	if (vol->nls_map) {
@@ -2530,7 +2524,7 @@ unl_upcase_iput_tmp_ino_err_out_now:
 	 */
 	mutex_lock(&ntfs_lock);
 	if (!--ntfs_nr_upcase_users && default_upcase) {
-		ntfs_free(default_upcase);
+		kvfree(default_upcase);
 		default_upcase = NULL;
 	}
 
@@ -2563,7 +2557,7 @@ struct kmem_cache *ntfs_big_inode_cache;
 /* Init once constructor for the inode slab cache. */
 static void ntfs_big_inode_init_once(void *foo)
 {
-	struct ntfs_inode *ni = (struct ntfs_inode *)foo;
+	struct ntfs_inode *ni = foo;
 
 	inode_init_once(VFS_I(ni));
 }
@@ -2771,7 +2765,8 @@ MODULE_AUTHOR("Anton Altaparmakov <anton@tuxera.com>"); /* Original read-only NT
 MODULE_AUTHOR("Namjae Jeon <linkinjeon@kernel.org>"); /* Add write, iomap and various features */
 MODULE_DESCRIPTION("NTFS read-write filesystem driver");
 MODULE_LICENSE("GPL");
+MODULE_ALIAS_FS("ntfsplus");
 #ifdef DEBUG
-module_param(debug_msgs, bint, 0);
+module_param(debug_msgs, uint, 0);
 MODULE_PARM_DESC(debug_msgs, "Enable debug messages.");
 #endif
