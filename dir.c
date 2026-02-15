@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * NTFS kernel directory operations. Part of the Linux-NTFS project.
+ * NTFS kernel directory operations.
  *
  * Copyright (c) 2001-2007 Anton Altaparmakov
  * Copyright (c) 2002 Richard Russon
@@ -15,13 +15,15 @@
 #include "index.h"
 #include "reparse.h"
 
-/**
+#include <linux/filelock.h>
+
+/*
  * The little endian Unicode string $I30 as a global constant.
  */
 __le16 I30[5] = { cpu_to_le16('$'), cpu_to_le16('I'),
 		cpu_to_le16('3'),	cpu_to_le16('0'), 0 };
 
-/**
+/*
  * ntfs_lookup_inode_by_name - find an inode in a directory given its name
  * @dir_ni:	ntfs inode of the directory in which to search for the name
  * @uname:	Unicode name for which to search in the directory
@@ -100,7 +102,7 @@ u64 ntfs_lookup_inode_by_name(struct ntfs_inode *dir_ni, const __le16 *uname,
 	if (unlikely(err)) {
 		if (err == -ENOENT) {
 			ntfs_error(sb,
-				"Index root attribute missing in directory inode 0x%lx.",
+				"Index root attribute missing in directory inode 0x%llx.",
 				dir_ni->mft_no);
 			err = -EIO;
 		}
@@ -336,29 +338,29 @@ fast_descend_into_child_node:
 	/* Bounds checks. */
 	if ((u8 *)ia < kaddr || (u8 *)ia > kaddr + PAGE_SIZE) {
 		ntfs_error(sb,
-			"Out of bounds check failed. Corrupt directory inode 0x%lx or driver bug.",
+			"Out of bounds check failed. Corrupt directory inode 0x%llx or driver bug.",
 			dir_ni->mft_no);
 		goto unm_err_out;
 	}
 	/* Catch multi sector transfer fixup errors. */
 	if (unlikely(!ntfs_is_indx_record(ia->magic))) {
 		ntfs_error(sb,
-			"Directory index record with vcn 0x%llx is corrupt.  Corrupt inode 0x%lx.  Run chkdsk.",
-			(unsigned long long)vcn, dir_ni->mft_no);
+			"Directory index record with vcn 0x%llx is corrupt.  Corrupt inode 0x%llx.  Run chkdsk.",
+			vcn, dir_ni->mft_no);
 		goto unm_err_out;
 	}
 	if (le64_to_cpu(ia->index_block_vcn) != vcn) {
 		ntfs_error(sb,
-			"Actual VCN (0x%llx) of index buffer is different from expected VCN (0x%llx). Directory inode 0x%lx is corrupt or driver bug.",
-			(unsigned long long)le64_to_cpu(ia->index_block_vcn),
-			(unsigned long long)vcn, dir_ni->mft_no);
+			"Actual VCN (0x%llx) of index buffer is different from expected VCN (0x%llx). Directory inode 0x%llx is corrupt or driver bug.",
+			le64_to_cpu(ia->index_block_vcn),
+			vcn, dir_ni->mft_no);
 		goto unm_err_out;
 	}
 	if (le32_to_cpu(ia->index.allocated_size) + 0x18 !=
 			dir_ni->itype.index.block_size) {
 		ntfs_error(sb,
-			"Index buffer (VCN 0x%llx) of directory inode 0x%lx has a size (%u) differing from the directory specified size (%u). Directory inode is corrupt or driver bug.",
-			(unsigned long long)vcn, dir_ni->mft_no,
+			"Index buffer (VCN 0x%llx) of directory inode 0x%llx has a size (%u) differing from the directory specified size (%u). Directory inode is corrupt or driver bug.",
+			vcn, dir_ni->mft_no,
 			le32_to_cpu(ia->index.allocated_size) + 0x18,
 			dir_ni->itype.index.block_size);
 		goto unm_err_out;
@@ -366,15 +368,15 @@ fast_descend_into_child_node:
 	index_end = (u8 *)ia + dir_ni->itype.index.block_size;
 	if (index_end > kaddr + PAGE_SIZE) {
 		ntfs_error(sb,
-			"Index buffer (VCN 0x%llx) of directory inode 0x%lx crosses page boundary. Impossible! Cannot access! This is probably a bug in the driver.",
-			(unsigned long long)vcn, dir_ni->mft_no);
+			"Index buffer (VCN 0x%llx) of directory inode 0x%llx crosses page boundary. Impossible! Cannot access! This is probably a bug in the driver.",
+			vcn, dir_ni->mft_no);
 		goto unm_err_out;
 	}
 	index_end = (u8 *)&ia->index + le32_to_cpu(ia->index.index_length);
 	if (index_end > (u8 *)ia + dir_ni->itype.index.block_size) {
 		ntfs_error(sb,
-			"Size of index buffer (VCN 0x%llx) of directory inode 0x%lx exceeds maximum size.",
-			(unsigned long long)vcn, dir_ni->mft_no);
+			"Size of index buffer (VCN 0x%llx) of directory inode 0x%llx exceeds maximum size.",
+			vcn, dir_ni->mft_no);
 		goto unm_err_out;
 	}
 	/* The first index entry. */
@@ -391,7 +393,7 @@ fast_descend_into_child_node:
 		    (u8 *)ie + sizeof(struct index_entry_header) > index_end ||
 		    (u8 *)ie + sizeof(struct index_entry_header) + le16_to_cpu(ie->key_length) >
 				index_end || (u8 *)ie + le16_to_cpu(ie->length) > index_end) {
-			ntfs_error(sb, "Index entry out of bounds in directory inode 0x%lx.",
+			ntfs_error(sb, "Index entry out of bounds in directory inode 0x%llx.",
 					dir_ni->mft_no);
 			goto unm_err_out;
 		}
@@ -544,7 +546,7 @@ found_it2:
 	if (ie->flags & INDEX_ENTRY_NODE) {
 		if ((ia->index.flags & NODE_MASK) == LEAF_NODE) {
 			ntfs_error(sb,
-				"Index entry with child node found in a leaf node in directory inode 0x%lx.",
+				"Index entry with child node found in a leaf node in directory inode 0x%llx.",
 				dir_ni->mft_no);
 			goto unm_err_out;
 		}
@@ -557,14 +559,14 @@ found_it2:
 			 * If vcn is in the same page cache page as old_vcn we
 			 * recycle the mapped page.
 			 */
-			if (NTFS_CLU_TO_PIDX(vol, old_vcn) ==
-			    NTFS_CLU_TO_PIDX(vol, vcn))
+			if (ntfs_cluster_to_pidx(vol, old_vcn) ==
+			    ntfs_cluster_to_pidx(vol, vcn))
 				goto fast_descend_into_child_node;
 			kfree(kaddr);
 			kaddr = NULL;
 			goto descend_into_child_node;
 		}
-		ntfs_error(sb, "Negative child node vcn in directory inode 0x%lx.",
+		ntfs_error(sb, "Negative child node vcn in directory inode 0x%llx.",
 				dir_ni->mft_no);
 		goto unm_err_out;
 	}
@@ -591,7 +593,7 @@ err_out:
 		unmap_mft_record(dir_ni);
 	kfree(name);
 	*res = NULL;
-	if (ia_vi && !IS_ERR(ia_vi))
+	if (!IS_ERR_OR_NULL(ia_vi))
 		iput(ia_vi);
 	return ERR_MREF(err);
 dir_err_out:
@@ -599,7 +601,7 @@ dir_err_out:
 	goto err_out;
 }
 
-/**
+/*
  * ntfs_filldir - ntfs specific filldir method
  * @vol:	current ntfs volume
  * @ndir:	ntfs inode of current directory
@@ -765,8 +767,8 @@ static int ntfs_readdir(struct file *file, struct dir_context *actor)
 	struct rb_root ra_root = RB_ROOT;
 	struct file_ra_state *ra;
 
-	ntfs_debug("Entering for inode 0x%lx, fpos 0x%llx.",
-			vdir->i_ino, actor->pos);
+	ntfs_debug("Entering for inode 0x%llx, fpos 0x%llx.",
+			ndir->mft_no, actor->pos);
 
 	if (file->private_data) {
 		private = file->private_data;
@@ -861,7 +863,7 @@ static int ntfs_readdir(struct file *file, struct dir_context *actor)
 	/* Find the index root attribute in the mft record. */
 	if (ntfs_attr_lookup(AT_INDEX_ROOT, I30, 4, CASE_SENSITIVE, 0, NULL, 0,
 				ctx)) {
-		ntfs_error(sb, "Index root attribute missing in directory inode %ld",
+		ntfs_error(sb, "Index root attribute missing in directory inode %llu",
 				ndir->mft_no);
 		ntfs_attr_put_search_ctx(ctx);
 		err = -ENOMEM;
@@ -928,13 +930,14 @@ nextdir:
 		}
 
 		if (ie_pos < actor->pos) {
-			ie_pos += next->length;
+			ie_pos += le16_to_cpu(next->length);
 			continue;
 		}
 
 		actor->pos = ie_pos;
 
-		index = NTFS_MFT_NR_TO_PIDX(vol, MREF_LE(next->data.dir.indexed_file));
+		index = ntfs_mft_no_to_pidx(vol,
+				MREF_LE(next->data.dir.indexed_file));
 		if (nir) {
 			struct ntfs_index_ra *cnir;
 			struct rb_node *node = ra_root.rb_node;
@@ -1005,7 +1008,7 @@ filldir:
 			private->key_length = next->key_length;
 			break;
 		}
-		ie_pos += next->length;
+		ie_pos += le16_to_cpu(next->length);
 	}
 
 	if (!err)
@@ -1029,8 +1032,10 @@ out:
 	}
 
 	if (err) {
-		private->curr_pos = actor->pos;
-		private->end_in_iterate = true;
+		if (private) {
+			private->curr_pos = actor->pos;
+			private->end_in_iterate = true;
+		}
 		err = 0;
 	}
 	ntfs_index_ctx_put(ictx);
@@ -1059,14 +1064,14 @@ int ntfs_check_empty_dir(struct ntfs_inode *ni, struct mft_record *ni_mrec)
 	ret = ntfs_attr_lookup(AT_INDEX_ROOT, I30, 4, CASE_SENSITIVE, 0, NULL,
 				0, ctx);
 	if (ret) {
-		ntfs_error(ni->vol->sb, "Index root attribute missing in directory inode %lld",
-				(unsigned long long)ni->mft_no);
+		ntfs_error(ni->vol->sb, "Index root attribute missing in directory inode %llu",
+				ni->mft_no);
 		ntfs_attr_put_search_ctx(ctx);
 		return ret;
 	}
 
 	/* Non-empty directory? */
-	if (ctx->attr->data.resident.value_length !=
+	if (le32_to_cpu(ctx->attr->data.resident.value_length) !=
 	    sizeof(struct index_root) + sizeof(struct index_entry_header)) {
 		/* Both ENOTEMPTY and EEXIST are ok. We use the more common. */
 		ret = -ENOTEMPTY;
@@ -1078,7 +1083,7 @@ int ntfs_check_empty_dir(struct ntfs_inode *ni, struct mft_record *ni_mrec)
 	return ret;
 }
 
-/**
+/*
  * ntfs_dir_open - called when an inode is about to be opened
  * @vi:		inode to be opened
  * @filp:	file structure describing the inode
@@ -1113,7 +1118,7 @@ static int ntfs_dir_release(struct inode *vi, struct file *filp)
 	return 0;
 }
 
-/**
+/*
  * ntfs_dir_fsync - sync a directory to disk
  * @filp:	file describing the directory to be synced
  * @start:	start offset to be synced
@@ -1145,7 +1150,7 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 	int err, ret;
 	struct ntfs_attr na;
 
-	ntfs_debug("Entering for inode 0x%lx.", vi->i_ino);
+	ntfs_debug("Entering for inode 0x%llx.", ni->mft_no);
 
 	if (NVolShutdown(vol))
 		return -EIO;
@@ -1154,7 +1159,7 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 	if (!ctx)
 		return -ENOMEM;
 
-	mutex_lock_nested(&ni->mrec_lock, NTFS_INODE_MUTEX_NORMAL_2);
+	mutex_lock_nested(&ni->mrec_lock, NTFS_INODE_MUTEX_NORMAL_CHILD);
 	while (!(err = ntfs_attr_lookup(AT_FILE_NAME, NULL, 0, 0, 0, NULL, 0, ctx))) {
 		struct file_name_attr *fn = (struct file_name_attr *)((u8 *)ctx->attr +
 				le16_to_cpu(ctx->attr->data.resident.value_offset));
@@ -1165,7 +1170,7 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 		parent_vi = ntfs_iget(vi->i_sb, MREF_LE(fn->parent_directory));
 		if (IS_ERR(parent_vi))
 			continue;
-		mutex_lock_nested(&NTFS_I(parent_vi)->mrec_lock, NTFS_INODE_MUTEX_PARENT_2);
+		mutex_lock_nested(&NTFS_I(parent_vi)->mrec_lock, NTFS_INODE_MUTEX_NORMAL);
 		ia_vi = ntfs_index_iget(parent_vi, I30, 4);
 		mutex_unlock(&NTFS_I(parent_vi)->mrec_lock);
 		if (IS_ERR(ia_vi)) {
@@ -1212,8 +1217,8 @@ static int ntfs_dir_fsync(struct file *filp, loff_t start, loff_t end,
 		ntfs_debug("Done.");
 	else
 		ntfs_warning(vi->i_sb,
-			"Failed to f%ssync inode 0x%lx.  Error %u.",
-			datasync ? "data" : "", vi->i_ino, -ret);
+			"Failed to f%ssync inode 0x%llx.  Error %u.",
+			datasync ? "data" : "", ni->mft_no, -ret);
 	inode_unlock(vi);
 	return ret;
 }
@@ -1229,4 +1234,5 @@ const struct file_operations ntfs_dir_ops = {
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= ntfs_compat_ioctl,
 #endif
+	.setlease	= generic_setlease,
 };

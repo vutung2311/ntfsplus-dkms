@@ -2,7 +2,7 @@
 
 _pkgname=ntfsplus
 pkgname=$_pkgname-dkms
-pkgver=6.18.0
+pkgver=1.0
 pkgrel=1
 pkgdesc='NTFS+ filesystem driver with write support using iomap (DKMS module for kernel 6.18+)'
 arch=('x86_64' 'i686')
@@ -13,6 +13,8 @@ provides=('ntfsplus-dkms')
 conflicts=('ntfsplus')
 
 source=("dkms.conf.in"
+        "pre-build.sh"
+        "post-build.sh"
         "Makefile"
         "Kconfig"
         "uapi_ntfs.h"
@@ -24,6 +26,7 @@ source=("dkms.conf.in"
         "attrlist.c"
         "attrlist.h"
         "bitmap.c"
+        "bdev-io.c"
         "bitmap.h"
         "collate.c"
         "collate.h"
@@ -53,6 +56,8 @@ source=("dkms.conf.in"
         "mst.c"
         "namei.c"
         "ntfs.h"
+        "object_id.c"
+        "object_id.h"
         "quota.c"
         "quota.h"
         "reparse.c"
@@ -68,61 +73,66 @@ source=("dkms.conf.in"
         "upcase.c"
         "volume.h")
 
-sha256sums=('166cf7af87d5d0ded0387e1a5e5c145fc4c5ad6df9abc5796074f8617493715f'
-            '5883813df96dcbed084fead2ac7ec79af6c4f5bb0d034be26e1b0e059da18da0'
-            '396badb51c657562a14c9ee8d443366db88d5e0d978e12ee1f3e7e4f3ebe2f70'
+sha256sums=('8cd1ac9cbc794a7733d2c59835127b89ac2a1bd660d17d21474507500f734815'
+            '7c960030abd962f6beff9325dab1305abd1ef75c10da1ca80364879e445a993f'
+            '65f6d5f8c9b66ccdf4e37eefdfcf9cc07ed88f8238c2e2d469a0d1484aaa0a45'
+            'ca212cb7552bafd6ef52ff7a821ff38ea62f058540aac432c2eb8a956161d06c'
+            '8b1eca9c7084181c39928926aa6c7fe1a87cbe82c9b44b17465079c7fb0f29be'
             'e96bfaa29d35c007398c9f60fe9b0faa5ba7276b78e4cb3f38a0b3c32427512a'
-            '5412d69c98063bb7e0291bbdfe84f30b1fd18a45f7e7b3d1dfed2ef424cb2eca'
-            '0c08c3d7d89bd45de4296f504fd8a94644e3aef780ec0f665186dceaa7378c07'
+            'e84fbf6573440b6e66b25ba17713645c706bb6a4095700de6f6e09036abc69ab'
+            '6583f4736b4c85a3e85f3a15818c1f8a8a49478495b88d0c75858d06a9314532'
             '3ef1f57419dcbf3d8bb4ea7a54f345c335c991af577bcf340ec8c91b32f2c366'
-            '07fc4cb1597b186460a1e6aa08dde5da9077424fdb7315341b3fc478e502c213'
-            '52b17f78ba4cc9bfd3e7bf04ecd24caaf21927022dc6ecd63079f8bd4d1eec6f'
-            '49487b8dac427e46b1b0618c1812c4f5fec7482ab918bb99f5b8e2bb0bc33abf'
-            '54bf4af560002044825754540d1bc9df4ad8c327f4954544969765c0fae8aae8'
-            '378fdef0229ecaea82c8c52088da4a8084de6d1c9d1a7d0673da27971edb4537'
-            'f11227f550b25d5d131979582506626c12a5c13b55c91ac6c956b57dd4bc869a'
-            '31a8d66c5653e4a31b05a36888cb96fa572c2762f82bfd31e4d4b9d65b65678b'
-            '3b7f0c6b274427336c74e281ff605ab47cf665692898d22ec00224008b7ea884'
-            '51dfd7a0afee760131fce9eb613edc63a47fd40deef407b1c7daa989e078c825'
-            'cdaf8577c0c0a244ee90da4d01c3824b6b83fd338305ebf52d31027471a033e3'
-            '0c131b4466fa8c9598ce2ee30086633992b915ed98b613b9e8a509a3546e5b74'
-            '9809e3ce76bd5a4f29f37127fbb6d3e183e46e4a47a5f5be8154f05f26a6bee7'
-            'de2c64a3ef545e95152c23bccfaf2bfb0d39302c8a37c8ce3fb6f43bf3e29275'
-            '4e30da118c22e6fb22544d7c2994ece56c3759157f5d35671e8e313d717771c6'
-            '0cc9c350d14cc0e243f153199601d1f5f43114768015bfe4085c29436c1a6c59'
+            '8adce153fd53b48a3719026deb7fe8e21916b6c38af7ea69eacca77e1d5b2d33'
+            '0d6d5a2a234a797195c31c100ab4bc6189497a7cee50b6d381e26aca1d0978d5'
+            'b72652f651f30dc3acb8304cd55aed2863dc3ab4b1403dd00a7ec712760d52d4'
+            '0c032fe0842c77abc0b2ff38250f2ae4770c2e72b0fe4c56bc961660a8fb9005'
+            '891a916b45b9b8716aaf52947d0cdd632172cf24fdd0d38344d50c18adb1d478'
+            'c549e1e1f4d6508f6df3b9af2a8274b68a9b750fcb3f2c09b289058c4eca194b'
+            'f8f5bb9b5e4dee9df9b471b2ee4d1589cb00481f05c3a98d2d46ab327a790e92'
+            '2f944ce52d04526a7c2f1050da907948b6721c555173722778a6ad89c4f3956c'
+            '15a2a9ebdf934016c1c72ec747441612e8ea86ce97176c6a560304f30e1485ef'
+            'c0300d07bfeca5beb59822e331c5e63c33ce5070fd70ee2ccfce1d8130123d6a'
+            'fa9a92cfdb8f47c3cc5244131acaa19a0d8ff3ffa21e04fa5a71237817229988'
+            '14a3fec37e0f2d63e6b686c8cd4a272f6b67a0b7f10b6a4ab39493666df72e3b'
+            'db58400b3ab7e412c1023beb133e16c5475bceee69d9c60038b3942c0575f1c5'
+            '6896c79e07b486f9051dafa2186c0cf283739496e9c5573c78f5b74c3da1dc71'
+            '507f03b0e20cfaf8e3098ae7dcd665d08493ef37e61b2135a4840ade48edee46'
+            '9db215a27ce2ea9ee582fae9b0fb058e1c8574f859d7d410e916a7d994a50f14'
             '91abc659762f385e8c1e92a55d8caa1eee8f45639ae80e21ddcd57f7a841d702'
-            '046735a43936d60c5e05681286d9a4e6ecad1afa1d7f9aed8ea0d8de291e4be2'
-            'a79548cf12a19983f788bc9f2d5975ea488376442cfe8f25f07a921fb26e6d43'
-            'b6aa2c49b9bb2952917deae8b5978ed950da615bae4b16ffe9576d33e8f5e822'
-            '657d5a2e91f11154e06246f40ac2469ea502ad4c8466794e13c3313a96865663'
-            '2316ab6039b98f89e938ff4c06e9b7ae5bb55c29238156042337145102187a01'
-            '25e1951f7ca60c8619216fd90bb2c326e67cc0ef4088944236755d52ffe493e1'
-            'a71d5f58c959413e0f2953673ccdb2867727b183e7252130fbbde9cb30c56b88'
-            '1f253f90cc33783554f1840b53c57a2049956ab1ca2d3917cd5386c14d58b159'
-            '3b3296a5a862bc981ae3e588c684cec61db0da04a620348778992bfab6813e90'
-            'bf2fd68d14d1fdd58749d41ebc9387c40d1c6db6a64a5b4b4c946c1c7892fcde'
-            '3c78637926780cacca469e6795421d5727ac20b91cc804640dcb455182ca8386'
-            '1b89ed72cda37099fb6ff22f9b7f917d8cbad1f52b4ef6b89f189fcee5a3c29e'
-            'b47be257e7e8e0dbde847aa42978b22946f198f8dba35023cdc59ceae80a2754'
-            '4b4ffd43f9b40a0081433fff0fc8b909150cbfbbb6c2efae6aeea49dbefdfe10'
-            'd1cc7b180ef7790c255a7d363f6a77ef865b2cda4e2b3512de1dfa61ac817a0a'
-            '3068d56ff110e5460a5b3da2792a0c61ea81067fb24f02af8cf96529ea38160d'
-            '47d26633ce68a51afae3dfc9c7033500d588b013b1f40ca254e0ea5161623eb0'
-            '2370ca72020641ac4ecaf1c09d55a19f0df426789944eb2fda85dd4adfd63851'
-            '0b87c784edc60f9d74ec7dd61737467bf085aa2e9445616a973b432cd0696f3d'
-            'ef79a6aa547456d1453648f136ed34537315f4a9fc1f00d5ab2cc0037a0ad555'
-            '5dfbe2a42433ee9de8aca32bb709b9af452b8cdd5a4032d4f142a317fb6876de'
-            '9029a5263176b5705613fe7c01cf1bf2bc4f3f65ba04f417b9616048e6b664a2'
-            '92bdc52122b32d230f06817b8036623ea3c520bdc6d42f2a5f2cd2a7ef4af3fa'
-            '34f0340c1081c67a0bb7fa11c0a6e7afca7ecb920f41c87f62ff82c38ec72f0c'
-            'a82b8640683ee4d39244eb81509ba10f883dcfd7246a78a44f4473cca8436ccf'
-            'c7cf727deae435f91adb41b272ced6ac6074f4f08202d4657fc7674fc3d40492'
-            '5c9dfd67a18bb862da6a0777d1c0f7627c130cba3fc9913f40d8c60eaede71ca'
-            'b32fc8d06580257d97b164f6b07e38e3549e7777f97c2ac6b6110166418e60b4'
+            '7e7dfede4abbd3363c4d95056b45e94eb90aab9ddd1abe56b551894a696717eb'
+            'ab5e3f95f5375da16125a8a7c2e408ed284853f41bfc6da2234548bd4e1b7d09'
+            '51b558913994d53651b871ddfa9edf50de50aa7cac84c842859b8ad1dcb45266'
+            '57378b000c33403498b00606596b1303bd1b9d41b44a2bcc562b489517b44c75'
+            '46863440a2ea0095eab01eea2c10657c05f32a168e42d79ea4a4cde1f5b57894'
+            '27dea0c48ccd356b697605d60390e837ac9e7f97883df4c85a158810b96150e4'
+            '8f42ef1948fcbda734d6766fdd17b64143a123111fadec8e6e1632ff4a99ce3a'
+            '474dbef47760a0f03446813465c551414df1a9457fb3342d8c3e4ed06a09daf3'
+            '5b546be6ea1bea113fa00718c0ad94ec984f7ab354d3e9ddd3e49475ad4ec2b9'
+            'a5ed692bada562110ac4886d857f5f68d35d7c72fe9e5a8cfb32f6441ea30458'
+            'd5c1275b8499925656b73bf38b5b172ee5f25b30231d52f426e35ce150f07cf2'
+            'bd8b6e360f466f2acaaea2bfc59ca5741dcd35698d676a22cc2e3fac9a950a6d'
+            '80b8cd247851e0e66d1ed1334be9ecdb01e7855b17cbb7da67d4dc2c56d56a35'
+            'fd15be7a9fa95d43393f289e13d4bb1d67cf32c3dcadf301bf780696e72f5b5e'
+            'e882fdd425911668c8775b40023791b714bd3b46a1694d710acb1fd7b53f0027'
+            'ae83aea04ea7085f586622292e148651ceeefaed800b8201ee04e0b2aa1d81e2'
+            '64ac143f7686fddfa21b99e02b3bb329dbd118d8876f013f12f2f1b055a93e15'
+            '24b6aee28a91ad3fc4e8da7f0f398ce47e142eb3a8566cefa0928ad8c307113b'
+            '84bb3475d914daf45c58a34509ce3e8bc5d539051232c1bcbca384ef2cb58f6f'
+            '51701cdbbe34b2f8debca747f40fec9b3c9f435305c4dad8b44930e40b6c43d0'
+            '2f0baa8449468749aea2fc38e0a0d938d6884c7024996ea9f1261e2fcde96218'
+            'b7b15e2b6deef71809bc7651cd3bbf6b40aa0c326e06a5613ef8b20d9ffbe3a6'
+            '30182014d1b4c3c40999ec61984d623f6718e575d5d24c9181d9678a84c793af'
+            '5788d121279a76a5eb89b95e7b3065215b153339e6a8cbeb816138a9f92baf60'
+            'b18b8c4edbb2cf3862ca204d295e09d91d2fd3b438265c78f5ba0c3ac3ddecca'
+            '69fff40b696705b6f48d7a648b4fd9eb3a2f9820c7d63dbfcd38e332d295625a'
+            '362ec9d8ae11c1d3634376ddb66135bf0bdf2bd4f5d6da15f9747154e7c3095d'
+            'e7fe4da3ee1c7e068c300c65f6a32ce9526f885dbca843644db693b0dee362a6'
+            '295a96c9bf8bf4917a8adc9b846a0b3986b51f3f6c154fc14ca12277df578744'
+            'ff68228a1839f51581bde615f47cd12e268144eb5345b52986ada9f83b34f7e6'
             '7f7f7d4f974fea87759dfd8260086f65da558d3218b804108c4b8db4517cad15'
-            '1c93f88f567c9a9228a2d577a2bbba836c3a39781f1b99eee149de7e68866dbd'
-            '5e6733c35504cb7c1a00cc0decc243af8cb91a9f4b47533de51ec6a7e36a89a2'
-            '675324d08415aad66361f00e506cecc2c9a4a525136cc0f34ae821024b64801c')
+            '99706e632ecff0036e327b33c6c4a29235712c83960a39e7c4ef3aad4ed99bdb'
+            '2e4de2ac978f905492dd505e938b949285251e1ec6dbff9da59002a4d7c86184'
+            'b7a7d532cc9be921e10291fb221e1095fb2df9b49a20edd591306f5e809bb164')
 
 prepare() {
   sed -e "s/@VERSION@/$pkgver/" \
@@ -133,6 +143,8 @@ package() {
   local dest="$pkgdir/usr/src/$_pkgname-$pkgver"
   
   install -Dm644 "$srcdir/dkms.conf.in" "$dest/dkms.conf"
+  install -Dm755 "$srcdir/pre-build.sh" "$dest/pre-build.sh"
+  install -Dm755 "$srcdir/post-build.sh" "$dest/post-build.sh"
   install -Dm644 "$srcdir/Makefile" "$dest/Makefile"
   install -Dm644 "$srcdir/Kconfig" "$dest/Kconfig"
   install -Dm644 "$srcdir/uapi_ntfs.h" "$dest/uapi_ntfs.h"
@@ -145,6 +157,7 @@ package() {
   install -Dm644 "$srcdir/attrlist.c" "$dest/attrlist.c"
   install -Dm644 "$srcdir/attrlist.h" "$dest/attrlist.h"
   install -Dm644 "$srcdir/bitmap.c" "$dest/bitmap.c"
+  install -Dm644 "$srcdir/bdev-io.c" "$dest/bdev-io.c"
   install -Dm644 "$srcdir/bitmap.h" "$dest/bitmap.h"
   install -Dm644 "$srcdir/collate.c" "$dest/collate.c"
   install -Dm644 "$srcdir/collate.h" "$dest/collate.h"
@@ -174,6 +187,8 @@ package() {
   install -Dm644 "$srcdir/mst.c" "$dest/mst.c"
   install -Dm644 "$srcdir/namei.c" "$dest/namei.c"
   install -Dm644 "$srcdir/ntfs.h" "$dest/ntfs.h"
+  install -Dm644 "$srcdir/object_id.c" "$dest/object_id.c"
+  install -Dm644 "$srcdir/object_id.h" "$dest/object_id.h"
   install -Dm644 "$srcdir/quota.c" "$dest/quota.c"
   install -Dm644 "$srcdir/quota.h" "$dest/quota.h"
   install -Dm644 "$srcdir/reparse.c" "$dest/reparse.c"
