@@ -3,5 +3,11 @@ PACKAGE_VERSION="@VERSION@"
 BUILT_MODULE_NAME[0]="ntfsplus"
 DEST_MODULE_LOCATION[0]="/kernel/fs/ntfsplus"
 AUTOINSTALL="yes"
-MAKE[0]="make default KDIR=/lib/modules/\${kernelver}/build"
-CLEAN="make clean KDIR=/lib/modules/\${kernelver}/build"
+MAKE[0]="make default KDIR=/lib/modules/${kernelver}/build"
+
+# If the kernel's bundled objtool binary fails to load (e.g. a libsframe ABI
+# mismatch between the rc kernel's build-time tools and the current system
+# libraries), replace it in-place with a working binary from another installed
+# kernel's build tree before building, then restore it afterwards.
+PRE_BUILD="pre-build.sh ${kernelver}"
+POST_BUILD="post-build.sh ${kernelver}"

@@ -2,7 +2,7 @@
 /*
  * Processing of reparse points
  *
- * Part of this file is based on code from the NTFS-3G project.
+ * Part of this file is based on code from the NTFS-3G.
  *
  * Copyright (c) 2008-2021 Jean-Pierre Andre
  * Copyright (c) 2025 LG Electronics Co., Ltd.
@@ -18,21 +18,53 @@
 #include "index.h"
 #include "lcnalloc.h"
 #include "reparse.h"
-#include "malloc.h"
 
-struct WSL_LINK_REPARSE_DATA {
+struct wsl_link_reparse_data {
 	__le32	type;
 	char	link[];
 };
 
-struct REPARSE_INDEX {			/* index entry in $Extend/$Reparse */
+/* Index entry in $Extend/$Reparse */
+struct reparse_index {
 	struct index_entry_header header;
 	struct reparse_index_key key;
 	__le32 filling;
 };
 
-__le16 reparse_index_name[] = { cpu_to_le16('$'),
-				  cpu_to_le16('R') };
+__le16 reparse_index_name[] = {cpu_to_le16('$'), cpu_to_le16('R'), 0};
+
+
+/*
+ * Check if the reparse point attribute buffer is valid.
+ * Returns true if valid, false otherwise.
+ */
+static bool ntfs_is_valid_reparse_buffer(struct ntfs_inode *ni,
+		const struct reparse_point *reparse_attr, size_t size)
+{
+	size_t expected;
+
+	if (!ni || !reparse_attr)
+		return false;
+
+	/* Minimum size must cover reparse_point header */
+	if (size < sizeof(struct reparse_point))
+		return false;
+
+	/* Reserved zero tag is invalid */
+	if (reparse_attr->reparse_tag == IO_REPARSE_TAG_RESERVED_ZERO)
+		return false;
+
+	/* Calculate expected total size */
+	expected = sizeof(struct reparse_point) +
+		le16_to_cpu(reparse_attr->reparse_data_length);
+
+	/* Add GUID size for non-Microsoft tags */
+	if (!(reparse_attr->reparse_tag & IO_REPARSE_TAG_IS_MICROSOFT))
+		expected += sizeof(struct guid);
+
+	/* Buffer must exactly match the expected size */
+	return expected == size;
+}
 
 /*
  * Do some sanity checks on reparse data
@@ -47,38 +79,28 @@ __le16 reparse_index_name[] = { cpu_to_le16('$'),
 static bool valid_reparse_data(struct ntfs_inode *ni,
 		const struct reparse_point *reparse_attr, size_t size)
 {
-	bool ok;
-	const struct WSL_LINK_REPARSE_DATA *wsl_reparse_data;
+	const struct wsl_link_reparse_data *wsl_reparse_data =
+		(const struct wsl_link_reparse_data *)reparse_attr->reparse_data;
+	unsigned int data_len = le16_to_cpu(reparse_attr->reparse_data_length);
 
-	ok = ni && reparse_attr && (size >= sizeof(struct reparse_point)) &&
-		(reparse_attr->reparse_tag != IO_REPARSE_TAG_RESERVED_ZERO) &&
-		(((size_t)le16_to_cpu(reparse_attr->reparse_data_length) +
-		  sizeof(struct reparse_point) +
-		  ((reparse_attr->reparse_tag & IO_REPARSE_TAG_IS_MICROSOFT) ?
-		   0 : sizeof(struct guid))) == size);
-	if (ok) {
-		switch (reparse_attr->reparse_tag) {
-		case IO_REPARSE_TAG_LX_SYMLINK:
-			wsl_reparse_data = (const struct WSL_LINK_REPARSE_DATA *)
-						reparse_attr->reparse_data;
-			if ((le16_to_cpu(reparse_attr->reparse_data_length) <=
-			     sizeof(wsl_reparse_data->type)) ||
-			    (wsl_reparse_data->type != cpu_to_le32(2)))
-				ok = false;
-			break;
-		case IO_REPARSE_TAG_AF_UNIX:
-		case IO_REPARSE_TAG_LX_FIFO:
-		case IO_REPARSE_TAG_LX_CHR:
-		case IO_REPARSE_TAG_LX_BLK:
-			if (reparse_attr->reparse_data_length ||
-			    !(ni->flags & FILE_ATTRIBUTE_RECALL_ON_OPEN))
-				ok = false;
-			break;
-		default:
-			break;
-		}
+	if (ntfs_is_valid_reparse_buffer(ni, reparse_attr, size) == false)
+		return false;
+
+	switch (reparse_attr->reparse_tag) {
+	case IO_REPARSE_TAG_LX_SYMLINK:
+		if (data_len <= sizeof(wsl_reparse_data->type) ||
+		    wsl_reparse_data->type != cpu_to_le32(2))
+			return false;
+		break;
+	case IO_REPARSE_TAG_AF_UNIX:
+	case IO_REPARSE_TAG_LX_FIFO:
+	case IO_REPARSE_TAG_LX_CHR:
+	case IO_REPARSE_TAG_LX_BLK:
+		if (data_len || !(ni->flags & FILE_ATTRIBUTE_RECALL_ON_OPEN))
+			return false;
 	}
-	return ok;
+
+	return true;
 }
 
 static unsigned int ntfs_reparse_tag_mode(struct reparse_point *reparse_attr)
@@ -114,7 +136,7 @@ unsigned int ntfs_make_symlink(struct ntfs_inode *ni)
 	s64 attr_size = 0;
 	unsigned int lth;
 	struct reparse_point *reparse_attr;
-	struct WSL_LINK_REPARSE_DATA *wsl_link_data;
+	struct wsl_link_reparse_data *wsl_link_data;
 	unsigned int mode = 0;
 
 	reparse_attr = ntfs_attr_readall(ni, AT_REPARSE_POINT, NULL, 0,
@@ -123,11 +145,12 @@ unsigned int ntfs_make_symlink(struct ntfs_inode *ni)
 	    valid_reparse_data(ni, reparse_attr, attr_size)) {
 		switch (reparse_attr->reparse_tag) {
 		case IO_REPARSE_TAG_LX_SYMLINK:
-			wsl_link_data = (struct WSL_LINK_REPARSE_DATA *)reparse_attr->reparse_data;
+			wsl_link_data =
+				(struct wsl_link_reparse_data *)reparse_attr->reparse_data;
 			if (wsl_link_data->type == cpu_to_le32(2)) {
 				lth = le16_to_cpu(reparse_attr->reparse_data_length) -
 						  sizeof(wsl_link_data->type);
-				ni->target = ntfs_malloc_nofs(lth + 1);
+				ni->target = kvzalloc(lth + 1, GFP_NOFS);
 				if (ni->target) {
 					memcpy(ni->target, wsl_link_data->link, lth);
 					ni->target[lth] = 0;
@@ -142,7 +165,7 @@ unsigned int ntfs_make_symlink(struct ntfs_inode *ni)
 		ni->flags &= ~FILE_ATTR_REPARSE_POINT;
 
 	if (reparse_attr)
-		ntfs_free(reparse_attr);
+		kvfree(reparse_attr);
 
 	return mode;
 }
@@ -182,7 +205,7 @@ unsigned int ntfs_reparse_tag_dt_types(struct ntfs_volume *vol, unsigned long mr
 	}
 
 	if (reparse_attr)
-		ntfs_free(reparse_attr);
+		kvfree(reparse_attr);
 
 	iput(vi);
 	return dt_type;
@@ -194,7 +217,7 @@ unsigned int ntfs_reparse_tag_dt_types(struct ntfs_volume *vol, unsigned long mr
 static int set_reparse_index(struct ntfs_inode *ni, struct ntfs_index_context *xr,
 		__le32 reparse_tag)
 {
-	struct REPARSE_INDEX indx;
+	struct reparse_index indx;
 	u64 file_id_cpu;
 	__le64 file_id;
 
@@ -204,7 +227,7 @@ static int set_reparse_index(struct ntfs_inode *ni, struct ntfs_index_context *x
 		cpu_to_le16(sizeof(struct index_entry_header) + sizeof(struct reparse_index_key));
 	indx.header.data.vi.data_length = 0;
 	indx.header.data.vi.reservedV = 0;
-	indx.header.length = cpu_to_le16(sizeof(struct REPARSE_INDEX));
+	indx.header.length = cpu_to_le16(sizeof(struct reparse_index));
 	indx.header.key_length = cpu_to_le16(sizeof(struct reparse_index_key));
 	indx.header.flags = 0;
 	indx.header.reserved = 0;
@@ -275,7 +298,7 @@ static struct ntfs_index_context *open_reparse_index(struct ntfs_volume *vol)
 		return NULL;
 	}
 
-	mutex_lock_nested(&NTFS_I(dir_vi)->mrec_lock, NTFS_REPARSE_MUTEX_PARENT);
+	mutex_lock_nested(&NTFS_I(dir_vi)->mrec_lock, NTFS_EXTEND_MUTEX_PARENT);
 	mref = ntfs_lookup_inode_by_name(NTFS_I(dir_vi), uname, uname_len,
 					 &name);
 	mutex_unlock(&NTFS_I(dir_vi)->mrec_lock);
@@ -378,7 +401,7 @@ int ntfs_delete_reparse_index(struct ntfs_inode *ni)
 	xr = open_reparse_index(ni->vol);
 	if (xr) {
 		xrni = xr->idx_ni;
-		mutex_lock_nested(&xrni->mrec_lock, NTFS_REPARSE_MUTEX_PARENT);
+		mutex_lock_nested(&xrni->mrec_lock, NTFS_EXTEND_MUTEX_PARENT);
 		err = remove_reparse_index(vi, xr, &reparse_tag);
 		if (err < 0) {
 			ntfs_index_ctx_put(xr);
@@ -451,7 +474,7 @@ static int ntfs_set_ntfs_reparse_data(struct ntfs_inode *ni, char *value, size_t
 	}
 
 	/* update value and index */
-	mutex_lock_nested(&xrni->mrec_lock, NTFS_REPARSE_MUTEX_PARENT);
+	mutex_lock_nested(&xrni->mrec_lock, NTFS_EXTEND_MUTEX_PARENT);
 	err = update_reparse_data(ni, xr, value, size);
 	if (err) {
 		ni->flags &= ~FILE_ATTR_REPARSE_POINT;
@@ -480,7 +503,7 @@ int ntfs_reparse_set_wsl_symlink(struct ntfs_inode *ni,
 	int reparse_len;
 	unsigned char *utarget = NULL;
 	struct reparse_point *reparse;
-	struct WSL_LINK_REPARSE_DATA *data;
+	struct wsl_link_reparse_data *data;
 
 	utarget = (char *)NULL;
 	len = ntfs_ucstonls(ni->vol, target, target_len, &utarget, 0);
@@ -488,12 +511,12 @@ int ntfs_reparse_set_wsl_symlink(struct ntfs_inode *ni,
 		return -EINVAL;
 
 	reparse_len = sizeof(struct reparse_point) + sizeof(data->type) + len;
-	reparse = (struct reparse_point *)ntfs_malloc_nofs(reparse_len);
+	reparse = kvzalloc(reparse_len, GFP_NOFS);
 	if (!reparse) {
 		err = -ENOMEM;
-		ntfs_free(utarget);
+		kvfree(utarget);
 	} else {
-		data = (struct WSL_LINK_REPARSE_DATA *)reparse->reparse_data;
+		data = (struct wsl_link_reparse_data *)reparse->reparse_data;
 		reparse->reparse_tag = IO_REPARSE_TAG_LX_SYMLINK;
 		reparse->reparse_data_length =
 			cpu_to_le16(sizeof(data->type) + len);
@@ -502,7 +525,7 @@ int ntfs_reparse_set_wsl_symlink(struct ntfs_inode *ni,
 		memcpy(data->link, utarget, len);
 		err = ntfs_set_ntfs_reparse_data(ni,
 				(char *)reparse, reparse_len);
-		ntfs_free(reparse);
+		kvfree(reparse);
 		if (!err)
 			ni->target = utarget;
 	}
@@ -534,7 +557,7 @@ int ntfs_reparse_set_wsl_not_symlink(struct ntfs_inode *ni, mode_t mode)
 		return -EOPNOTSUPP;
 
 	reparse_len = sizeof(struct reparse_point) + len;
-	reparse = (struct reparse_point *)ntfs_malloc_nofs(reparse_len);
+	reparse = kvzalloc(reparse_len, GFP_NOFS);
 	if (!reparse)
 		err = -ENOMEM;
 	else {
@@ -543,7 +566,7 @@ int ntfs_reparse_set_wsl_not_symlink(struct ntfs_inode *ni, mode_t mode)
 		reparse->reserved = cpu_to_le16(0);
 		err = ntfs_set_ntfs_reparse_data(ni, (char *)reparse,
 						 reparse_len);
-		ntfs_free(reparse);
+		kvfree(reparse);
 	}
 
 	return err;
