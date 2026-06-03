@@ -58,8 +58,6 @@ source=("dkms.conf.in"
         "ntfs.h"
         "object_id.c"
         "object_id.h"
-        "quota.c"
-        "quota.h"
         "reparse.c"
         "reparse.h"
         "runlist.c"
@@ -76,63 +74,61 @@ source=("dkms.conf.in"
 sha256sums=('8cd1ac9cbc794a7733d2c59835127b89ac2a1bd660d17d21474507500f734815'
             '7c960030abd962f6beff9325dab1305abd1ef75c10da1ca80364879e445a993f'
             '65f6d5f8c9b66ccdf4e37eefdfcf9cc07ed88f8238c2e2d469a0d1484aaa0a45'
-            '6052ee38f9ce3670cab4b727df1f084689494d0f2c6bf9cfc3d8b8207a8fe0cf'
+            '0ef763ab4ec3673011713a6984e02e0471f9777af19b83448e3a3db953277296'
             '8b1eca9c7084181c39928926aa6c7fe1a87cbe82c9b44b17465079c7fb0f29be'
             'e96bfaa29d35c007398c9f60fe9b0faa5ba7276b78e4cb3f38a0b3c32427512a'
-            '51ddfc7baeb7c1671210dfbfa070ee17972f3736d09bb9b8b70937b72971f8bc'
+            '5e211fc3d06b6c28963f07b712795f290128ae981020f84ef03344f647350ad1'
             'a64d2aa9fd5cefccd286f3141a37fa08075efda8831c8a820bb34de841adc3e8'
             '3ef1f57419dcbf3d8bb4ea7a54f345c335c991af577bcf340ec8c91b32f2c366'
-            '1e3e8be6a2a56f0f43332e3e498c075d760a9bf38337af754c9be4ed59339d68'
+            '2e7776127930f4f0f91afd7d7c7ec96417eb9eb7210c664ce4e99034b97be7ce'
             '0d6d5a2a234a797195c31c100ab4bc6189497a7cee50b6d381e26aca1d0978d5'
-            'b72652f651f30dc3acb8304cd55aed2863dc3ab4b1403dd00a7ec712760d52d4'
+            '416b21932b92bf796423dbfac7950b9df5ffbe43c566fdcf594099d591bfa7c0'
             '0c032fe0842c77abc0b2ff38250f2ae4770c2e72b0fe4c56bc961660a8fb9005'
             'd1ad38df42107596ded9500239fc01f1f907db5a65976e4e669951d5c5e8e7ea'
-            'c549e1e1f4d6508f6df3b9af2a8274b68a9b750fcb3f2c09b289058c4eca194b'
+            '736f4e0c6299a03f0d3399aeeb61f2d869de7c37cb2ee4d8bdbd2bb513caa8c0'
             'f8f5bb9b5e4dee9df9b471b2ee4d1589cb00481f05c3a98d2d46ab327a790e92'
             '2f944ce52d04526a7c2f1050da907948b6721c555173722778a6ad89c4f3956c'
             '15a2a9ebdf934016c1c72ec747441612e8ea86ce97176c6a560304f30e1485ef'
             'e3ed192ad94f75812dc6243eca2eb9376b8b6e224a81e0c60d75b0470098c347'
             'fa9a92cfdb8f47c3cc5244131acaa19a0d8ff3ffa21e04fa5a71237817229988'
             '14a3fec37e0f2d63e6b686c8cd4a272f6b67a0b7f10b6a4ab39493666df72e3b'
-            'c4d1ba909ab9ace7206e3873e62460d610c9d1056fdc7193ba837e95c47e9de1'
+            '5756f1649b2c35491de76148b1cd38c60503b534135fcc46fb77b98002599ac7'
             '6896c79e07b486f9051dafa2186c0cf283739496e9c5573c78f5b74c3da1dc71'
-            '1db43cb27e3e6e92e1c123ccbfbbc76a8d527848df97af9264286b5b80b17e62'
+            'd38bcb6668f18b0da6a20a96f0220b2fafd439f3e20434e1e6956433d35ac400'
             '9db215a27ce2ea9ee582fae9b0fb058e1c8574f859d7d410e916a7d994a50f14'
             '91abc659762f385e8c1e92a55d8caa1eee8f45639ae80e21ddcd57f7a841d702'
-            'f813d534de37257342cc5af2ebd8c6337dbef6214f8fa2c34277fc8f4fbce751'
-            '080dd800280b355355f4bf594c8b7dfba1b684cb8eac909f840e61fe6302ab6d'
-            '51b558913994d53651b871ddfa9edf50de50aa7cac84c842859b8ad1dcb45266'
-            '18395c80a9fab7d6c26cc32e4f2d56cfbe8bc680165fb42f49bf026f5331489d'
+            'a7dcb56b46928f215ebb01b7313333d5aad13842fd594268ff9c52a23cb2f2c1'
+            'ec9a8371fd9e5675ea81c04aae075f2cfcdb2a857b70dc0eb7b6fcb117c19490'
+            'a9926e4192dcb6cfc80eae3023715fd3722fa4db4d966454b80798c56573b7fc'
+            '2cb5c961fa2ff3d5db5c92a4f8be6eec3318c9d2406fe550a5fab0a410c28c39'
             '46863440a2ea0095eab01eea2c10657c05f32a168e42d79ea4a4cde1f5b57894'
             'e07ef8180a60a286bddc66e4b646c2b31a1bf712fc54c8003df420fe56006ba9'
             '8f42ef1948fcbda734d6766fdd17b64143a123111fadec8e6e1632ff4a99ce3a'
             '474dbef47760a0f03446813465c551414df1a9457fb3342d8c3e4ed06a09daf3'
             '5b546be6ea1bea113fa00718c0ad94ec984f7ab354d3e9ddd3e49475ad4ec2b9'
             'a5ed692bada562110ac4886d857f5f68d35d7c72fe9e5a8cfb32f6441ea30458'
-            'd5c1275b8499925656b73bf38b5b172ee5f25b30231d52f426e35ce150f07cf2'
+            '5cd297f35f6a070dd44602e97a729b0860504544df85ea9f87b0e24e46b75855'
             'bd8b6e360f466f2acaaea2bfc59ca5741dcd35698d676a22cc2e3fac9a950a6d'
             '80b8cd247851e0e66d1ed1334be9ecdb01e7855b17cbb7da67d4dc2c56d56a35'
-            '47ea7d99e48b148874e6c5e99784aed3d163ecef89501f99d25649bf66ebde1c'
+            '490f55245d7a30cb0b29f312a8a8fbb5b212595c767b4f55467a339c5ab903d2'
             'e882fdd425911668c8775b40023791b714bd3b46a1694d710acb1fd7b53f0027'
             'ae83aea04ea7085f586622292e148651ceeefaed800b8201ee04e0b2aa1d81e2'
-            '45cf21bb33d012c9225268f5e71f0e2ae51bb1740da4c8091fe5e842e2ec0be3'
+            '371e9f06c318241cea313b55a143b642d1104e236f61115e33195b00d408a1a1'
             '24b6aee28a91ad3fc4e8da7f0f398ce47e142eb3a8566cefa0928ad8c307113b'
             '84bb3475d914daf45c58a34509ce3e8bc5d539051232c1bcbca384ef2cb58f6f'
             '51701cdbbe34b2f8debca747f40fec9b3c9f435305c4dad8b44930e40b6c43d0'
-            '2f0baa8449468749aea2fc38e0a0d938d6884c7024996ea9f1261e2fcde96218'
-            'b7b15e2b6deef71809bc7651cd3bbf6b40aa0c326e06a5613ef8b20d9ffbe3a6'
             '9b9ed094a5ef604492ff914ef2e3fa0206b74adef96390f8680c2f53ff12c848'
             '5788d121279a76a5eb89b95e7b3065215b153339e6a8cbeb816138a9f92baf60'
-            'd19a982095f8a6f7858a3b0dc79a0168361ce385435df738b39434aa1976985a'
+            '1df9f1cf835c49c27b777e0529a161cb099e54f84044b90dda2cb5c7875ae665'
             '69fff40b696705b6f48d7a648b4fd9eb3a2f9820c7d63dbfcd38e332d295625a'
-            'ff5ccec5c9931120cdd0efd6242816e87e43194a2e5e8cf9b7ccca50ae071070'
+            '8c932f7e71e69879519e7594bf096d0deb638714b55500b098f2b5eb32a1721f'
             'e7fe4da3ee1c7e068c300c65f6a32ce9526f885dbca843644db693b0dee362a6'
             '295a96c9bf8bf4917a8adc9b846a0b3986b51f3f6c154fc14ca12277df578744'
             'ff68228a1839f51581bde615f47cd12e268144eb5345b52986ada9f83b34f7e6'
             '7f7f7d4f974fea87759dfd8260086f65da558d3218b804108c4b8db4517cad15'
             '99706e632ecff0036e327b33c6c4a29235712c83960a39e7c4ef3aad4ed99bdb'
             '2e4de2ac978f905492dd505e938b949285251e1ec6dbff9da59002a4d7c86184'
-            'b7a7d532cc9be921e10291fb221e1095fb2df9b49a20edd591306f5e809bb164')
+            '71687317c6393e847906d918cd01531f873dcab8014bdc99dddbec3f80e87a90')
 
 prepare() {
   sed -e "s/@VERSION@/$pkgver/" \
@@ -189,8 +185,6 @@ package() {
   install -Dm644 "$srcdir/ntfs.h" "$dest/ntfs.h"
   install -Dm644 "$srcdir/object_id.c" "$dest/object_id.c"
   install -Dm644 "$srcdir/object_id.h" "$dest/object_id.h"
-  install -Dm644 "$srcdir/quota.c" "$dest/quota.c"
-  install -Dm644 "$srcdir/quota.h" "$dest/quota.h"
   install -Dm644 "$srcdir/reparse.c" "$dest/reparse.c"
   install -Dm644 "$srcdir/reparse.h" "$dest/reparse.h"
   install -Dm644 "$srcdir/runlist.c" "$dest/runlist.c"

@@ -10,6 +10,10 @@
 #include <linux/fs.h>
 #include <linux/iomap.h>
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 11, 0)
+#include <linux/string_choices.h>
+#endif
+
 #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 13, 0)
 /*
  * inode_state_read_once() / inode_state_set() were added during the 6.13
@@ -164,6 +168,13 @@ typedef u64 ntfs_ino_t;
 #define NTFS_SUBMIT_READ_PARAMS	const struct iomap_iter *iter, \
 				struct iomap_read_folio_ctx *ctx
 #define NTFS_SUBMIT_READ_CTX	ctx
+#endif
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+static inline const char *str_plural(size_t num)
+{
+	return num == 1 ? "" : "s";
+}
 #endif
 
 #endif /* _NTFSPLUS_COMPAT_H */

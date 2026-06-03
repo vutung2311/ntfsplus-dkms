@@ -890,7 +890,6 @@ skip_attr_list_load:
 	 */
 	if (S_ISDIR(vi->i_mode)) {
 		struct index_root *ir;
-		u8 *ir_end, *index_end;
 
 view_index_meta:
 		/* It is a directory, find index root attribute. */
@@ -940,10 +939,9 @@ view_index_meta:
 		}
 		ir = (struct index_root *)((u8 *)a +
 				le16_to_cpu(a->data.resident.value_offset));
-		ir_end = (u8 *)ir + le32_to_cpu(a->data.resident.value_length);
-		index_end = (u8 *)&ir->index +
-				le32_to_cpu(ir->index.index_length);
-		if (index_end > ir_end) {
+		if (ntfs_index_root_inconsistent(ni->vol, a, ir, ni->mft_no) ||
+		    ntfs_index_entries_inconsistent(ni->vol, &ir->index,
+						    ir->collation_rule, ni->mft_no)) {
 			ntfs_error(vi->i_sb, "Directory index is corrupt.");
 			goto unm_err_out;
 		}
@@ -1483,7 +1481,6 @@ static int ntfs_read_locked_index_inode(struct inode *base_vi, struct inode *vi)
 	struct attr_record *a;
 	struct ntfs_attr_search_ctx *ctx;
 	struct index_root *ir;
-	u8 *ir_end, *index_end;
 	int err = 0;
 
 	ntfs_debug("Entering for i_ino 0x%llx.", ni->mft_no);
@@ -1534,9 +1531,9 @@ static int ntfs_read_locked_index_inode(struct inode *base_vi, struct inode *vi)
 	}
 
 	ir = (struct index_root *)((u8 *)a + le16_to_cpu(a->data.resident.value_offset));
-	ir_end = (u8 *)ir + le32_to_cpu(a->data.resident.value_length);
-	index_end = (u8 *)&ir->index + le32_to_cpu(ir->index.index_length);
-	if (index_end > ir_end) {
+	if (ntfs_index_root_inconsistent(vol, a, ir, ni->mft_no) ||
+	    ntfs_index_entries_inconsistent(vol, &ir->index,
+					    ir->collation_rule, ni->mft_no)) {
 		ntfs_error(vi->i_sb, "Index is corrupt.");
 		goto unm_err_out;
 	}
@@ -2582,8 +2579,8 @@ int ntfs_inode_sync_filename(struct ntfs_inode *ni)
 
 		mutex_lock_nested(&index_ni->mrec_lock, NTFS_INODE_MUTEX_PARENT);
 		if (NInoBeingDeleted(ni)) {
-			iput(index_vi);
 			mutex_unlock(&index_ni->mrec_lock);
+			iput(index_vi);
 			continue;
 		}
 
@@ -2591,8 +2588,8 @@ int ntfs_inode_sync_filename(struct ntfs_inode *ni)
 		if (!ictx) {
 			ntfs_error(sb, "Failed to get index ctx, inode %llu",
 					index_ni->mft_no);
-			iput(index_vi);
 			mutex_unlock(&index_ni->mrec_lock);
+			iput(index_vi);
 			continue;
 		}
 
@@ -2601,8 +2598,8 @@ int ntfs_inode_sync_filename(struct ntfs_inode *ni)
 			ntfs_debug("Index lookup failed, inode %llu",
 					index_ni->mft_no);
 			ntfs_index_ctx_put(ictx);
-			iput(index_vi);
 			mutex_unlock(&index_ni->mrec_lock);
+			iput(index_vi);
 			continue;
 		}
 		/* Update flags and file size. */
