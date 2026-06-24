@@ -15,7 +15,9 @@
 #include "index.h"
 #include "reparse.h"
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
 #include <linux/filelock.h>
+#endif
 
 /*
  * The little endian Unicode string $I30 as a global constant.
@@ -80,7 +82,11 @@ u64 ntfs_lookup_inode_by_name(struct ntfs_inode *dir_ni, const __le16 *uname,
 	int err, rc;
 	s64 vcn, old_vcn;
 	struct address_space *ia_mapping;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 	struct folio *folio;
+#else
+	struct page *page;
+#endif
 	u8 *kaddr = NULL;
 	struct ntfs_name *name = NULL;
 
@@ -305,6 +311,7 @@ descend_into_child_node:
 	 * of PAGE_SIZE and map the page cache page, reading it from
 	 * disk if necessary.
 	 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 	folio = read_mapping_folio(ia_mapping, vcn <<
 			dir_ni->itype.index.vcn_size_bits >> PAGE_SHIFT, NULL);
 	if (IS_ERR(folio)) {
@@ -327,6 +334,27 @@ descend_into_child_node:
 	post_read_mst_fixup((struct ntfs_record *)kaddr, PAGE_SIZE);
 	folio_unlock(folio);
 	folio_put(folio);
+#else
+	page = read_mapping_page(ia_mapping, vcn <<
+			dir_ni->itype.index.vcn_size_bits >> PAGE_SHIFT, NULL);
+	if (IS_ERR(page)) {
+		ntfs_error(sb, "Failed to map directory index page, error %ld.",
+				-PTR_ERR(page));
+		err = PTR_ERR(page);
+		goto err_out;
+	}
+	lock_page(page);
+	kaddr = kmalloc(PAGE_SIZE, GFP_NOFS);
+	if (!kaddr) {
+		err = -ENOMEM;
+		goto unm_err_out;
+	}
+	memcpy(kaddr, (u8 *)page_address(page), PAGE_SIZE);
+	post_read_mst_fixup((struct ntfs_record *)kaddr, PAGE_SIZE);
+	unlock_page(page);
+	kunmap(page);
+	put_page(page);
+#endif
 fast_descend_into_child_node:
 	/* Get to the index allocation block. */
 	ia = (struct index_block *)(kaddr + ((vcn <<
@@ -1191,9 +1219,13 @@ const struct file_operations ntfs_dir_ops = {
 	.fsync		= ntfs_dir_fsync,	/* Sync a directory to disk. */
 	.open		= ntfs_dir_open,	/* Open directory. */
 	.release	= ntfs_dir_release,
+#if LINUX_VERSION_CODE > KERNEL_VERSION(5, 16, 0)
 	.unlocked_ioctl	= ntfs_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl	= ntfs_compat_ioctl,
 #endif
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
 	.setlease	= generic_setlease,
+#endif
 };

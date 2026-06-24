@@ -71,6 +71,10 @@ int ntfs_attr_lookup(const __le32 type, const __le16 *name,
 		const u32 name_len, const u32 ic,
 		const s64 lowest_vcn, const u8 *val, const u32 val_len,
 		struct ntfs_attr_search_ctx *ctx);
+bool ntfs_attr_list_entry_is_valid(const struct attr_list_entry *ale,
+				   const u8 *al_end);
+bool ntfs_attr_list_is_valid(const u8 *al_start, s64 size);
+
 int load_attribute_list(struct ntfs_inode *base_ni,
 			       u8 *al_start, const s64 size);
 
@@ -97,6 +101,7 @@ int ntfs_resident_attr_value_resize(struct mft_record *m, struct attr_record *a,
 int ntfs_attr_make_non_resident(struct ntfs_inode *ni, const u32 data_size);
 int ntfs_attr_set(struct ntfs_inode *ni, const s64 ofs, const s64 cnt,
 		const u8 val);
+int ntfs_resident_attr_sync_folio(struct ntfs_inode *ni, const u8 *kaddr);
 int ntfs_attr_set_initialized_size(struct ntfs_inode *ni, loff_t new_size);
 int ntfs_attr_open(struct ntfs_inode *ni, const __le32 type,
 		__le16 *name, u32 name_len);

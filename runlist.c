@@ -741,7 +741,9 @@ struct runlist_element *ntfs_mapping_pairs_decompress(const struct ntfs_volume *
 	int rlsize;		/* Size of runlist buffer. */
 	u16 rlpos;		/* Current runlist position in units of struct runlist_elements. */
 	u8 b;			/* Current byte offset in buf. */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
 	u64 lowest_vcn;		/* Raw on-disk lowest_vcn. */
+#endif
 
 #ifdef DEBUG
 	/* Make sure attr exists and is non-resident. */
@@ -750,6 +752,7 @@ struct runlist_element *ntfs_mapping_pairs_decompress(const struct ntfs_volume *
 		return ERR_PTR(-EINVAL);
 	}
 #endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 2, 0)
 	lowest_vcn = le64_to_cpu(attr->data.non_resident.lowest_vcn);
 	/* Validate lowest_vcn from on-disk metadata to ensure it is sane. */
 	if (overflows_type(lowest_vcn, vcn)) {
@@ -758,6 +761,13 @@ struct runlist_element *ntfs_mapping_pairs_decompress(const struct ntfs_volume *
 	}
 	/* Start at vcn = lowest_vcn and lcn 0. */
 	vcn = lowest_vcn;
+#else
+	/* Validate lowest_vcn from on-disk metadata to ensure it is sane. */
+	if (unlikely(vcn < 0)) {
+		ntfs_error(vol->sb, "Invalid lowest_vcn in mapping pairs.");
+		goto err_out;
+	}
+#endif
 	lcn = 0;
 	/* Get start of the mapping pairs array. */
 	buf = (u8 *)attr +
@@ -860,7 +870,11 @@ struct runlist_element *ntfs_mapping_pairs_decompress(const struct ntfs_volume *
 			for (deltaxcn = (s8)buf[b--]; b > b2; b--)
 				deltaxcn = (deltaxcn << 8) + buf[b];
 			/* Change the current lcn to its new value. */
-			lcn += deltaxcn;
+			if (unlikely(check_add_overflow(lcn, deltaxcn, &lcn))) {
+				ntfs_error(vol->sb,
+						"LCN overflow in mapping pairs array.");
+				goto err_out;
+			}
 #ifdef DEBUG
 			/*
 			 * On NTFS 1.2-, apparently can have lcn == -1 to
@@ -1616,7 +1630,7 @@ int ntfs_rl_sparse(struct runlist_element *rl)
 	for (rlc = rl; rlc->length; rlc++)
 		if (rlc->lcn < 0) {
 			if (rlc->lcn != LCN_HOLE && rlc->lcn != LCN_DELALLOC) {
-				pr_err("%s: bad runlist\n", __func__);
+				pr_err("%s: bad runlist", __func__);
 				return -EINVAL;
 			}
 			return 1;
@@ -1832,7 +1846,7 @@ struct runlist_element *ntfs_rl_punch_hole(struct runlist_element *dst_rl, int d
 
 	punch_cnt = (int)(e_rl - s_rl) + 1;
 
-	*punch_rl = kvcalloc(punch_cnt + 1, sizeof(struct runlist_element),
+	*punch_rl = kvcalloc((punch_cnt + 1), sizeof(struct runlist_element),
 			GFP_NOFS);
 	if (!*punch_rl)
 		return ERR_PTR(-ENOMEM);

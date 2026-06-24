@@ -581,6 +581,7 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 	struct mft_record *m;
 	struct attr_record *a;
 	__le16 new_aflags;
+	u16 old_name_ofs, old_mp_ofs;
 	int mp_size, mp_ofs, name_ofs, arec_size, err;
 
 	m = map_mft_record(ni);
@@ -613,8 +614,10 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 	else
 		new_aflags &= ~ATTR_IS_COMPRESSED;
 
-	if (new_aflags == a->flags)
-		return 0;
+	if (new_aflags == a->flags) {
+		err = 0;
+		goto err_out;
+	}
 
 	if ((new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)) ==
 			  (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)) {
@@ -623,14 +626,39 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 		goto err_out;
 	}
 
-	if (!a->non_resident)
-		goto out;
+	if (!a->non_resident) {
+		if (!(new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)))
+			return 0;
 
-	if (a->data.non_resident.data_size) {
-		pr_err("Can't change sparsed/compressed for non-empty file\n");
-		err = -EOPNOTSUPP;
-		goto err_out;
+		if (le32_to_cpu(a->data.resident.value_length)) {
+			pr_err("Can't change sparse/compressed for non-empty file");
+			err = -EOPNOTSUPP;
+			goto err_out;
+		}
+
+		err = ntfs_attr_make_non_resident(ni, 0);
+		if (err)
+			goto err_out;
+
+		ntfs_attr_reinit_search_ctx(ctx);
+		err = ntfs_attr_lookup(ni->type, ni->name,
+				       ni->name_len, CASE_SENSITIVE,
+				       0, NULL, 0, ctx);
+		if (err) {
+			err = -EINVAL;
+			goto err_out;
+		}
+		a = ctx->attr;
+	} else {
+		if (a->data.non_resident.data_size) {
+			pr_err("Can't change sparsed/compressed for non-empty file");
+			err = -EOPNOTSUPP;
+			goto err_out;
+		}
 	}
+
+	old_name_ofs = le16_to_cpu(a->name_offset);
+	old_mp_ofs = le16_to_cpu(a->data.non_resident.mapping_pairs_offset);
 
 	if (new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED))
 		name_ofs = (offsetof(struct attr_record,
@@ -654,6 +682,25 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 	if (unlikely(err))
 		goto err_out;
 
+	/*
+	 * When compressed/sparse state changes, the non-resident header grows or
+	 * shrinks by the compressed_size field. Update the in-record payload layout
+	 * to match the new offsets before exposing the new mapping_pairs_offset.
+	 */
+	if (name_ofs > old_name_ofs) {
+		if (mp_ofs != old_mp_ofs)
+			memmove((u8 *)a + mp_ofs, (u8 *)a + old_mp_ofs, mp_size);
+		if (a->name_length)
+			memmove((u8 *)a + name_ofs, (u8 *)a + old_name_ofs,
+				a->name_length * sizeof(__le16));
+	} else {
+		if (a->name_length && name_ofs != old_name_ofs)
+			memmove((u8 *)a + name_ofs, (u8 *)a + old_name_ofs,
+				a->name_length * sizeof(__le16));
+		if (mp_ofs != old_mp_ofs)
+			memmove((u8 *)a + mp_ofs, (u8 *)a + old_mp_ofs, mp_size);
+	}
+
 	if (new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)) {
 		a->data.non_resident.compression_unit = 0;
 		if (new_aflags & ATTR_IS_COMPRESSED || ni->vol->major_ver < 3)
@@ -674,28 +721,31 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 			ni->itype.compressed.block_size_bits = 0;
 			ni->itype.compressed.block_clusters = 0;
 		}
-
-		if (new_aflags & ATTR_IS_SPARSE) {
-			NInoSetSparse(ni);
-			ni->flags |= FILE_ATTR_SPARSE_FILE;
-		}
-
-		if (new_aflags & ATTR_IS_COMPRESSED) {
-			NInoSetCompressed(ni);
-			ni->flags |= FILE_ATTR_COMPRESSED;
-		}
 	} else {
-		ni->flags &= ~(FILE_ATTR_SPARSE_FILE | FILE_ATTR_COMPRESSED);
 		a->data.non_resident.compression_unit = 0;
-		NInoClearSparse(ni);
-		NInoClearCompressed(ni);
 	}
 
 	a->name_offset = cpu_to_le16(name_ofs);
 	a->data.non_resident.mapping_pairs_offset = cpu_to_le16(mp_ofs);
 
-out:
 	a->flags = new_aflags;
+
+	if (new_aflags & ATTR_IS_SPARSE) {
+		NInoSetSparse(ni);
+		ni->flags |= FILE_ATTR_SPARSE_FILE;
+	} else {
+		NInoClearSparse(ni);
+		ni->flags &= ~FILE_ATTR_SPARSE_FILE;
+	}
+
+	if (new_aflags & ATTR_IS_COMPRESSED) {
+		NInoSetCompressed(ni);
+		ni->flags |= FILE_ATTR_COMPRESSED;
+	} else {
+		NInoClearCompressed(ni);
+		ni->flags &= ~FILE_ATTR_COMPRESSED;
+	}
+
 	mark_mft_record_dirty(ctx->ntfs_ino);
 err_out:
 	if (ctx)
@@ -704,10 +754,17 @@ err_out:
 	return err;
 }
 
+#if LINUX_VERSION_CODE > KERNEL_VERSION(6, 3, 0)
 static int ntfs_setxattr(const struct xattr_handler *handler,
 		struct mnt_idmap *idmap, struct dentry *unused,
 		struct inode *inode, const char *name, const void *value,
 		size_t size, int flags)
+#else
+static int ntfs_setxattr(const struct xattr_handler *handler,
+		struct user_namespace *mnt_userns, struct dentry *unused,
+		struct inode *inode, const char *name, const void *value,
+		size_t size, int flags)
+#endif
 {
 	struct ntfs_inode *ni = NTFS_I(inode);
 	int err;
@@ -768,7 +825,11 @@ set_fattr:
 	mutex_unlock(&ni->mrec_lock);
 
 out:
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 	inode_set_ctime_current(inode);
+#else
+	inode->i_ctime = current_time(inode);
+#endif
 	mark_inode_dirty(inode);
 	return err;
 }
@@ -793,10 +854,15 @@ const struct xattr_handler * const ntfs_xattr_handlers[] = {
 // clang-format on
 
 #ifdef CONFIG_NTFS_FS_POSIX_ACL
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 struct posix_acl *ntfs_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 			       int type)
 {
 	struct inode *inode = d_inode(dentry);
+#else
+struct posix_acl *ntfs_get_acl(struct inode *inode, int type, bool rcu)
+{
+#endif
 	struct ntfs_inode *ni = NTFS_I(inode);
 	const char *name;
 	size_t name_len;
@@ -837,9 +903,15 @@ struct posix_acl *ntfs_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	return acl;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 				    struct inode *inode, struct posix_acl *acl,
 				    int type, bool init_acl)
+#else
+static noinline int ntfs_set_acl_ex(struct user_namespace *mnt_userns,
+				    struct inode *inode, struct posix_acl *acl,
+				    int type, bool init_acl)
+#endif
 {
 	const char *name;
 	size_t size, name_len;
@@ -856,7 +928,11 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 	case ACL_TYPE_ACCESS:
 		/* Do not change i_mode if we are in init_acl */
 		if (acl && !init_acl) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 			err = posix_acl_update_mode(idmap, inode, &mode, &acl);
+#else
+			err = posix_acl_update_mode(mnt_userns, inode, &mode, &acl);
+#endif
 			if (err)
 				return err;
 		}
@@ -881,9 +957,19 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 		value = NULL;
 		flags = XATTR_REPLACE;
 	} else {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
 		value = posix_acl_to_xattr(&init_user_ns, acl, &size, GFP_NOFS);
 		if (!value)
 			return -ENOMEM;
+#else
+		size = posix_acl_xattr_size(acl->a_count);
+		value = kmalloc(size, GFP_NOFS);
+		if (!value)
+			return -ENOMEM;
+		err = posix_acl_to_xattr(&init_user_ns, acl, value, size);
+		if (err < 0)
+			goto out;
+#endif
 		flags = 0;
 	}
 
@@ -909,7 +995,11 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 		mutex_unlock(&NTFS_I(inode)->mrec_lock);
 
 		set_cached_acl(inode, type, acl);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 		inode_set_ctime_current(inode);
+#else
+		inode->i_ctime = current_time(inode);
+#endif
 		mark_inode_dirty(inode);
 	}
 
@@ -919,14 +1009,27 @@ out:
 	return err;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 int ntfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 		 struct posix_acl *acl, int type)
 {
 	return ntfs_set_acl_ex(idmap, d_inode(dentry), acl, type, false);
 }
+#else
+int ntfs_set_acl(struct user_namespace *mnt_userns, struct inode *inode,
+		 struct posix_acl *acl, int type)
+{
+	return ntfs_set_acl_ex(mnt_userns, inode, acl, type, false);
+}
+#endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 int ntfs_init_acl(struct mnt_idmap *idmap, struct inode *inode,
 		  struct inode *dir)
+#else
+int ntfs_init_acl(struct user_namespace *mnt_userns, struct inode *inode,
+		  struct inode *dir)
+#endif
 {
 	struct posix_acl *default_acl, *acl;
 	int err;
@@ -936,8 +1039,13 @@ int ntfs_init_acl(struct mnt_idmap *idmap, struct inode *inode,
 		return err;
 
 	if (default_acl) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 		err = ntfs_set_acl_ex(idmap, inode, default_acl,
 				      ACL_TYPE_DEFAULT, true);
+#else
+		err = ntfs_set_acl_ex(mnt_userns, inode, default_acl,
+				      ACL_TYPE_DEFAULT, true);
+#endif
 		posix_acl_release(default_acl);
 	} else {
 		inode->i_default_acl = NULL;
@@ -945,8 +1053,13 @@ int ntfs_init_acl(struct mnt_idmap *idmap, struct inode *inode,
 
 	if (acl) {
 		if (!err)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 			err = ntfs_set_acl_ex(idmap, inode, acl,
 					      ACL_TYPE_ACCESS, true);
+#else
+			err = ntfs_set_acl_ex(mnt_userns, inode, acl,
+					      ACL_TYPE_ACCESS, true);
+#endif
 		posix_acl_release(acl);
 	} else {
 		inode->i_acl = NULL;
