@@ -488,6 +488,8 @@ void __ntfs_init_inode(struct super_block *sb, struct ntfs_inode *ni)
 	ni->flags = 0;
 	ni->mft_lcn[0] = LCN_RL_NOT_MAPPED;
 	ni->mft_lcn_count = 0;
+	ni->reparse_tag = 0;
+	ni->reparse_flags = 0;
 	ni->target = NULL;
 	ni->i_dealloc_clusters = 0;
 }
@@ -848,6 +850,12 @@ static int ntfs_read_locked_inode(struct inode *vi)
 					a->data.resident.value_offset),
 					le32_to_cpu(
 					a->data.resident.value_length));
+			/* A resident list is not validated on load; check it now. */
+			if (!ntfs_attr_list_is_valid(ni->attr_list,
+						     ni->attr_list_size)) {
+				ntfs_error(vi->i_sb, "Corrupt attribute list.");
+				goto unm_err_out;
+			}
 		}
 	}
 skip_attr_list_load:
@@ -857,8 +865,26 @@ skip_attr_list_load:
 		ntfs_ea_get_wsl_inode(vi, &dev, flags);
 	}
 
-	if (m->flags & MFT_RECORD_IS_DIRECTORY) {
+	if (ni->flags & FILE_ATTR_REPARSE_POINT) {
+		unsigned int mode;
+
+		mode = ntfs_make_symlink(ni);
+		if (mode)
+			vi->i_mode |= mode;
+		else {
+			vi->i_mode &= ~S_IFLNK;
+			if (m->flags & MFT_RECORD_IS_DIRECTORY)
+				vi->i_mode |= S_IFDIR;
+			else
+				vi->i_mode |= S_IFREG;
+		}
+	} else if (m->flags & MFT_RECORD_IS_DIRECTORY) {
 		vi->i_mode |= S_IFDIR;
+	} else {
+		vi->i_mode |= S_IFREG;
+	}
+
+	if (S_ISDIR(vi->i_mode)) {
 		/*
 		 * Apply the directory permissions mask set in the mount
 		 * options.
@@ -868,18 +894,6 @@ skip_attr_list_load:
 		if (vi->i_nlink > 1)
 			set_nlink(vi, 1);
 	} else {
-		if (ni->flags & FILE_ATTR_REPARSE_POINT) {
-			unsigned int mode;
-
-			mode = ntfs_make_symlink(ni);
-			if (mode)
-				vi->i_mode |= mode;
-			else {
-				vi->i_mode &= ~S_IFLNK;
-				vi->i_mode |= S_IFREG;
-			}
-		} else
-			vi->i_mode |= S_IFREG;
 		/* Apply the file permissions mask set in the mount options. */
 		vi->i_mode &= ~vol->fmask;
 	}
@@ -888,7 +902,7 @@ skip_attr_list_load:
 	 * If an attribute list is present we now have the attribute list value
 	 * in ntfs_ino->attr_list and it is ntfs_ino->attr_list_size bytes.
 	 */
-	if (S_ISDIR(vi->i_mode)) {
+	if (m->flags & MFT_RECORD_IS_DIRECTORY) {
 		struct index_root *ir;
 
 view_index_meta:
@@ -1012,7 +1026,7 @@ view_index_meta:
 		m = NULL;
 		ctx = NULL;
 		/* Setup the operations for this inode. */
-		ntfs_set_vfs_operations(vi, S_IFDIR, 0);
+		ntfs_set_vfs_operations(vi, vi->i_mode, 0);
 		if (ir->index.flags & LARGE_INDEX)
 			NInoSetIndexAllocPresent(ni);
 	} else {
@@ -1192,6 +1206,9 @@ no_data_attr_special_case:
 		vi->i_blocks = ni->itype.compressed.size >> 9;
 	else
 		vi->i_blocks = ni->allocated_size >> 9;
+
+	if (S_ISLNK(vi->i_mode) && ni->target)
+		vi->i_size = strlen(ni->target);
 
 	ntfs_debug("Done.");
 	return 0;
@@ -1991,10 +2008,7 @@ int ntfs_read_inode_mount(struct inode *vi)
 			/* Catch the end of the attribute list. */
 			if ((u8 *)al_entry == al_end)
 				goto em_put_err_out;
-			if (!al_entry->length)
-				goto em_put_err_out;
-			if ((u8 *)al_entry + 6 > al_end ||
-			    (u8 *)al_entry + le16_to_cpu(al_entry->length) > al_end)
+			if (!ntfs_attr_list_entry_is_valid(al_entry, al_end))
 				goto em_put_err_out;
 			next_al_entry = (struct attr_list_entry *)((u8 *)al_entry +
 					le16_to_cpu(al_entry->length));
@@ -2364,6 +2378,14 @@ int ntfs_show_options(struct seq_file *sf, struct dentry *root)
 		seq_puts(sf, ",discard");
 	if (NVolDisableSparse(vol))
 		seq_puts(sf, ",disable_sparse");
+	if (NVolNativeSymlinkRel(vol))
+		seq_puts(sf, ",native_symlink=rel");
+	else
+		seq_puts(sf, ",native_symlink=raw");
+	if (NVolSymlinkNative(vol))
+		seq_puts(sf, ",symlink=native");
+	else
+		seq_puts(sf, ",symlink=wsl");
 	if (vol->sb->s_flags & SB_POSIXACL)
 		seq_puts(sf, ",acl");
 	return 0;

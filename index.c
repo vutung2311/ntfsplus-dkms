@@ -1240,6 +1240,8 @@ static int ntfs_ir_reparent(struct ntfs_index_context *icx)
 	struct index_entry *ie;
 	struct index_block *ib = NULL;
 	s64 new_ib_vcn;
+	u32 index_length;
+	u32 old_value_length;
 	int ix_root_size;
 	int ret = 0;
 
@@ -1287,6 +1289,21 @@ retry:
 		goto clear_bmp;
 	}
 
+	old_value_length = le32_to_cpu(ctx->attr->data.resident.value_length);
+	index_length = le32_to_cpu(ir->index.entries_offset) +
+		sizeof(struct index_entry_header) + sizeof(s64);
+	ix_root_size = offsetof(struct index_root, index) + index_length;
+	/* Grow the resident value before publishing the larger root header. */
+	if (ix_root_size > old_value_length) {
+		ret = ntfs_resident_attr_value_resize(ctx->mrec, ctx->attr, ix_root_size);
+		if (ret)
+			goto resize_failed;
+
+		icx->idx_ni->data_size = ix_root_size;
+		icx->idx_ni->initialized_size = ix_root_size;
+		icx->idx_ni->allocated_size = (ix_root_size + 7) & ~7;
+	}
+
 	ntfs_ir_nill(ir);
 
 	ie = ntfs_ie_get_first(&ir->index);
@@ -1295,48 +1312,49 @@ retry:
 
 	ir->index.flags = LARGE_INDEX;
 	NInoSetIndexAllocPresent(icx->idx_ni);
-	ir->index.index_length = cpu_to_le32(le32_to_cpu(ir->index.entries_offset) +
-			le16_to_cpu(ie->length));
+	ir->index.index_length = cpu_to_le32(index_length);
 	ir->index.allocated_size = ir->index.index_length;
 
-	ix_root_size = sizeof(struct index_root) - sizeof(struct index_header) +
-		le32_to_cpu(ir->index.allocated_size);
-	ret  = ntfs_resident_attr_value_resize(ctx->mrec, ctx->attr, ix_root_size);
-	if (ret) {
-		/*
-		 * When there is no space to build a non-resident
-		 * index, we may have to move the root to an extent
-		 */
-		if ((ret == -ENOSPC) && (ctx->al_entry || !ntfs_inode_add_attrlist(icx->idx_ni))) {
-			ntfs_attr_put_search_ctx(ctx);
-			ctx = NULL;
-			ir = ntfs_ir_lookup(icx->idx_ni, icx->name, icx->name_len, &ctx);
-			if (ir && !ntfs_attr_record_move_away(ctx, ix_root_size -
-					le32_to_cpu(ctx->attr->data.resident.value_length))) {
-				if (ntfs_attrlist_update(ctx->base_ntfs_ino ?
-							 ctx->base_ntfs_ino : ctx->ntfs_ino))
-					goto clear_bmp;
-				ntfs_attr_put_search_ctx(ctx);
-				ctx = NULL;
-				goto retry;
-			}
-		}
-		goto clear_bmp;
-	} else {
-		icx->idx_ni->data_size = icx->idx_ni->initialized_size = ix_root_size;
-		icx->idx_ni->allocated_size = (ix_root_size  + 7) & ~7;
+	if (ix_root_size <= old_value_length) {
+		ret = ntfs_resident_attr_value_resize(ctx->mrec, ctx->attr, ix_root_size);
+		if (ret)
+			goto resize_failed;
+
+		icx->idx_ni->data_size = ix_root_size;
+		icx->idx_ni->initialized_size = ix_root_size;
+		icx->idx_ni->allocated_size = (ix_root_size + 7) & ~7;
 	}
 	ntfs_ie_set_vcn(ie, new_ib_vcn);
+	goto err_out;
 
+resize_failed:
+	/*
+	 * When there is no space to build a non-resident
+	 * index, we may have to move the root to an extent
+	 */
+	if ((ret == -ENOSPC) && (ctx->al_entry || !ntfs_inode_add_attrlist(icx->idx_ni))) {
+		ntfs_attr_put_search_ctx(ctx);
+		ctx = NULL;
+		ir = ntfs_ir_lookup(icx->idx_ni, icx->name, icx->name_len, &ctx);
+		if (ir && !ntfs_attr_record_move_away(ctx, ix_root_size -
+				le32_to_cpu(ctx->attr->data.resident.value_length))) {
+			if (ntfs_attrlist_update(ctx->base_ntfs_ino ?
+						 ctx->base_ntfs_ino : ctx->ntfs_ino))
+				goto clear_bmp;
+			ntfs_attr_put_search_ctx(ctx);
+			ctx = NULL;
+			goto retry;
+		}
+	}
+clear_bmp:
+	ntfs_ibm_clear(icx, new_ib_vcn);
+	goto err_out;
 err_out:
 	kvfree(ib);
 	if (ctx)
 		ntfs_attr_put_search_ctx(ctx);
 out:
 	return ret;
-clear_bmp:
-	ntfs_ibm_clear(icx, new_ib_vcn);
-	goto err_out;
 }
 
 /*
@@ -1347,8 +1365,15 @@ clear_bmp:
 static int ntfs_ir_truncate(struct ntfs_index_context *icx, int data_size)
 {
 	int ret;
+	u32 old_allocated_size;
+	bool shrink;
 
 	ntfs_debug("Entering\n");
+
+	old_allocated_size = le32_to_cpu(icx->ir->index.allocated_size);
+	shrink = data_size < old_allocated_size;
+	if (shrink)
+		icx->ir->index.allocated_size = cpu_to_le32(data_size);
 
 	/*
 	 *  INDEX_ROOT must be resident and its entries can be moved to
@@ -1361,9 +1386,14 @@ static int ntfs_ir_truncate(struct ntfs_index_context *icx, int data_size)
 		if (!icx->ir)
 			return -ENOENT;
 
-		icx->ir->index.allocated_size = cpu_to_le32(data_size);
-	} else if (ret != -ENOSPC)
-		ntfs_error(icx->idx_ni->vol->sb, "Failed to truncate INDEX_ROOT");
+		if (!shrink)
+			icx->ir->index.allocated_size = cpu_to_le32(data_size);
+	} else {
+		if (shrink)
+			icx->ir->index.allocated_size = cpu_to_le32(old_allocated_size);
+		if (ret != -ENOSPC)
+			ntfs_error(icx->idx_ni->vol->sb, "Failed to truncate INDEX_ROOT");
+	}
 
 	return ret;
 }

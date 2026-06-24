@@ -44,6 +44,28 @@ static const struct constant_table ntfs_param_enums[] = {
 };
 
 enum {
+	NATIVE_SYMLINK_RAW,
+	NATIVE_SYMLINK_REL,
+};
+
+static const struct constant_table ntfs_native_symlink_enums[] = {
+	{ "raw",		NATIVE_SYMLINK_RAW },
+	{ "rel",		NATIVE_SYMLINK_REL },
+	{}
+};
+
+enum {
+	SYMLINK_WSL,
+	SYMLINK_NATIVE,
+};
+
+static const struct constant_table ntfs_symlink_enums[] = {
+	{ "wsl",		SYMLINK_WSL },
+	{ "native",		SYMLINK_NATIVE },
+	{}
+};
+
+enum {
 	Opt_uid,
 	Opt_gid,
 	Opt_umask,
@@ -66,6 +88,8 @@ enum {
 	Opt_acl,
 	Opt_discard,
 	Opt_nocase,
+	Opt_native_symlink,
+	Opt_symlink,
 };
 
 static const struct fs_parameter_spec ntfs_parameters[] = {
@@ -91,6 +115,8 @@ static const struct fs_parameter_spec ntfs_parameters[] = {
 	fsparam_flag("discard",			Opt_discard),
 	fsparam_flag("sparse",			Opt_sparse),
 	fsparam_flag("nocase",			Opt_nocase),
+	fsparam_enum("native_symlink",		Opt_native_symlink, ntfs_native_symlink_enums),
+	fsparam_enum("symlink",			Opt_symlink, ntfs_symlink_enums),
 	{}
 };
 
@@ -214,6 +240,18 @@ static int ntfs_parse_param(struct fs_context *fc, struct fs_parameter *param)
 			NVolSetDisableSparse(vol);
 		else
 			NVolClearDisableSparse(vol);
+		break;
+	case Opt_native_symlink:
+		if (result.uint_32 == NATIVE_SYMLINK_REL)
+			NVolSetNativeSymlinkRel(vol);
+		else
+			NVolClearNativeSymlinkRel(vol);
+		break;
+	case Opt_symlink:
+		if (result.uint_32 == SYMLINK_NATIVE)
+			NVolSetSymlinkNative(vol);
+		else
+			NVolClearSymlinkNative(vol);
 		break;
 	case Opt_sparse:
 		break;
@@ -444,10 +482,15 @@ int ntfs_write_volume_label(struct ntfs_volume *vol, char *label)
 		goto out;
 	}
 
-	if (!ntfs_attr_lookup(AT_VOLUME_NAME, NULL, 0, 0, 0, NULL, 0,
-			     ctx))
-		ntfs_attr_record_rm(ctx);
+	ret = ntfs_attr_lookup(AT_VOLUME_NAME, NULL, 0, 0, 0, NULL, 0,
+			       ctx);
+	if (!ret)
+		ret = ntfs_attr_record_rm(ctx);
+	else if (ret == -ENOENT)
+		ret = 0;
 	ntfs_attr_put_search_ctx(ctx);
+	if (ret)
+		goto out;
 
 	ret = ntfs_resident_attr_record_add(vol_ni, AT_VOLUME_NAME, AT_UNNAMED, 0,
 					    (u8 *)uname, uname_len * sizeof(__le16), 0);
@@ -1456,6 +1499,7 @@ iput_volume_failed:
 			vol->volume_label = NULL;
 	}
 
+	ntfs_attr_reinit_search_ctx(ctx);
 	if (ntfs_attr_lookup(AT_VOLUME_INFORMATION, NULL, 0, 0, 0, NULL, 0,
 			ctx) || ctx->attr->non_resident || ctx->attr->flags) {
 		ntfs_attr_put_search_ctx(ctx);
