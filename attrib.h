@@ -101,6 +101,7 @@ int ntfs_resident_attr_value_resize(struct mft_record *m, struct attr_record *a,
 int ntfs_attr_make_non_resident(struct ntfs_inode *ni, const u32 data_size);
 int ntfs_attr_set(struct ntfs_inode *ni, const s64 ofs, const s64 cnt,
 		const u8 val);
+int ntfs_resident_attr_sync_folio(struct ntfs_inode *ni, const u8 *kaddr);
 int ntfs_attr_set_initialized_size(struct ntfs_inode *ni, loff_t new_size);
 int ntfs_attr_open(struct ntfs_inode *ni, const __le32 type,
 		__le16 *name, u32 name_len);

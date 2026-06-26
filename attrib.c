@@ -2266,6 +2266,11 @@ int ntfs_attr_set(struct ntfs_inode *ni, s64 ofs, s64 cnt, const u8 val)
 		folio_lock(folio);
 		addr = kmap_local_folio(folio, offset);
 		memset(addr, val, attr_len);
+		if (!NInoNonResident(ni)) {
+			u8 *kaddr = kmap_local_folio(folio, 0);
+			ntfs_resident_attr_sync_folio(ni, kaddr);
+			kunmap_local(kaddr);
+		}
 		kunmap_local(addr);
 
 		folio_mark_dirty(folio);
@@ -2279,6 +2284,60 @@ int ntfs_attr_set(struct ntfs_inode *ni, s64 ofs, s64 cnt, const u8 val)
 	}
 
 	return ret;
+}
+
+/**
+ * ntfs_resident_attr_sync_folio - copy folio data back to resident MFT record
+ * @ni:		ntfs attribute inode
+ * @kaddr:	pointer to the start of the mapped folio data (offset 0)
+ *
+ * This function is used when a resident attribute is modified in the folio
+ * cache (which bypasses standard writeback since resident inodes do not write
+ * pages). It maps the base MFT record, finds the resident attribute, copies
+ * the data from the folio, and marks the base MFT record dirty.
+ *
+ * Return 0 on success, or -errno on error.
+ */
+int ntfs_resident_attr_sync_folio(struct ntfs_inode *ni, const u8 *kaddr)
+{
+	struct ntfs_inode *base_ni = NInoAttr(ni) ? ni->ext.base_ntfs_ino : ni;
+	struct mft_record *mrec;
+	struct ntfs_attr_search_ctx *ctx;
+	int err = 0;
+
+	mrec = map_mft_record(base_ni);
+	if (IS_ERR(mrec))
+		return PTR_ERR(mrec);
+
+	ctx = ntfs_attr_get_search_ctx(base_ni, mrec);
+	if (!ctx) {
+		unmap_mft_record(base_ni);
+		return -ENOMEM;
+	}
+
+	err = ntfs_attr_lookup(ni->type, ni->name, ni->name_len,
+			CASE_SENSITIVE, 0, NULL, 0, ctx);
+	if (err) {
+		if (err == -ENOENT)
+			err = -EIO;
+		goto out;
+	}
+
+	struct attr_record *a = ctx->attr;
+	if (unlikely(a->non_resident)) {
+		err = -EIO;
+		goto out;
+	}
+
+	u32 value_len = le32_to_cpu(a->data.resident.value_length);
+	u16 value_offset = le16_to_cpu(a->data.resident.value_offset);
+	memcpy((u8 *)a + value_offset, kaddr, value_len);
+	mark_mft_record_dirty(base_ni);
+
+out:
+	ntfs_attr_put_search_ctx(ctx);
+	unmap_mft_record(base_ni);
+	return err;
 }
 
 int ntfs_attr_set_initialized_size(struct ntfs_inode *ni, loff_t new_size)

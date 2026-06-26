@@ -1732,13 +1732,15 @@ static void ntfs_put_super(struct super_block *sb)
 
 	ntfs_commit_inode(vol->root_ino);
 
-	ntfs_commit_inode(vol->lcnbmp_ino);
-
+	if (vol->lcnbmp_ino)
+		filemap_write_and_wait(vol->lcnbmp_ino->i_mapping);
+ 
 	/*
 	 * the GFP_NOFS scope is not needed because ntfs_commit_inode
 	 * does nothing
 	 */
-	ntfs_commit_inode(vol->mftbmp_ino);
+	if (vol->mftbmp_ino)
+		filemap_write_and_wait(vol->mftbmp_ino->i_mapping);
 
 	if (vol->logfile_ino)
 		ntfs_commit_inode(vol->logfile_ino);

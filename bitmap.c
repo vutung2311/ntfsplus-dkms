@@ -11,6 +11,7 @@
 
 #include "bitmap.h"
 #include "ntfs.h"
+#include "attrib.h"
 
 int ntfs_trim_fs(struct ntfs_volume *vol, struct fstrim_range *range)
 {
@@ -255,6 +256,9 @@ int __ntfs_bitmap_set_bits_in_run(struct inode *vi, const s64 start_bit,
 	}
 done:
 	/* We are done.  Unmap the folio and return success. */
+	if (!NInoNonResident(ni)) {
+		ntfs_resident_attr_sync_folio(ni, kaddr);
+	}
 	folio_mark_dirty(folio);
 	folio_unlock(folio);
 	kunmap_local(kaddr);
