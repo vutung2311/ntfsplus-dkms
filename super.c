@@ -2794,7 +2794,11 @@ MODULE_ALIAS_FS("ntfsplus");
 
 static int ntfs_workqueue_init(void)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+	ntfs_wq = alloc_workqueue("ntfs-bg-io", WQ_PERCPU, 0);
+#else
 	ntfs_wq = alloc_workqueue("ntfs-bg-io", 0, 0);
+#endif
 	if (!ntfs_wq)
 		return -ENOMEM;
 	return 0;
