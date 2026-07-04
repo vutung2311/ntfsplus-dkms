@@ -128,10 +128,19 @@ out_unlock:
 
 static int ntfs_file_release(struct inode *vi, struct file *filp)
 {
-	if (!NInoCompressed(NTFS_I(vi)))
-		return ntfs_trim_prealloc(vi);
+	struct ntfs_inode *ni = NTFS_I(vi);
+	int err = 0;
 
-	return 0;
+	if (!NInoCompressed(ni))
+		err = ntfs_trim_prealloc(vi);
+
+	if (NInoTestClearFileNameDirty(ni)) {
+		int err2 = ntfs_inode_sync_filename(ni);
+		if (err2 && !err)
+			err = err2;
+	}
+
+	return err;
 }
 
 /*
