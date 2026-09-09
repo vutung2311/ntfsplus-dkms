@@ -1446,7 +1446,7 @@ static int ntfs_write_cb(struct ntfs_inode *ni, loff_t pos, struct page **pages,
 	bio_pos = ntfs_cluster_to_bytes(vol, bio_lcn);
 	bio = bio_alloc(vol->sb->s_bdev, DIV_ROUND_UP(bio_size, PAGE_SIZE),
 			REQ_OP_WRITE, GFP_NOIO);
-	bio->bi_iter.bi_sector = ntfs_bytes_to_sector(vol, bio_pos);
+	bio->bi_iter.bi_sector = ntfs_bytes_to_bio_sector(bio_pos);
 
 	for (i = 0; bio_size; i++) {
 		unsigned int len = min_t(unsigned int, bio_size, PAGE_SIZE);
@@ -1482,7 +1482,7 @@ static int ntfs_write_cb(struct ntfs_inode *ni, loff_t pos, struct page **pages,
 	ni->runlist.rl = rl;
 	rlc = NULL;
 
-	err = ntfs_attr_update_mapping_pairs(ni, 0);
+	err = ntfs_attr_update_mapping_pairs_locked(ni, 0, ni);
 	up_write(&ni->runlist.lock);
 	if (err)
 		err = -EIO;

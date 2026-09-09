@@ -122,17 +122,19 @@ static int ntfs_get_ea(struct inode *inode, const char *name, size_t name_len,
 
 	p_ea_info = ntfs_attr_readall(ni, AT_EA_INFORMATION, NULL, 0,
 			&ea_info_size);
-	if (!p_ea_info || ea_info_size != sizeof(struct ea_information)) {
+	if (IS_ERR(p_ea_info))
+		return PTR_ERR(p_ea_info);
+	if (ea_info_size != sizeof(struct ea_information)) {
 		kvfree(p_ea_info);
-		return -ENODATA;
+		return -EIO;
 	}
 
 	ea_info_qlen = le32_to_cpu(p_ea_info->ea_query_length);
 	kvfree(p_ea_info);
 
 	ea_buf = ntfs_attr_readall(ni, AT_EA, NULL, 0, &all_ea_size);
-	if (!ea_buf)
-		return -ENODATA;
+	if (IS_ERR(ea_buf))
+		return PTR_ERR(ea_buf);
 
 	if (ea_info_qlen > all_ea_size) {
 		err = -EIO;
@@ -208,12 +210,22 @@ static int ntfs_set_ea(struct inode *inode, const char *name, size_t name_len,
 	if (ntfs_attr_exist(ni, AT_EA_INFORMATION, AT_UNNAMED, 0)) {
 		p_ea_info = ntfs_attr_readall(ni, AT_EA_INFORMATION, NULL, 0,
 						&ea_info_size);
-		if (!p_ea_info || ea_info_size != sizeof(struct ea_information)) {
+		if (IS_ERR(p_ea_info)) {
+			err = PTR_ERR(p_ea_info);
+			p_ea_info = NULL;
+			goto out;
+		}
+		if (ea_info_size != sizeof(struct ea_information)) {
 			err = -EIO;
 			goto out;
 		}
 
 		ea_buf = ntfs_attr_readall(ni, AT_EA, NULL, 0, &all_ea_size);
+		if (IS_ERR(ea_buf)) {
+			err = PTR_ERR(ea_buf);
+			ea_buf = NULL;
+			goto out;
+		}
 		if (!ea_buf) {
 			ea_info_qsize = 0;
 			kvfree(p_ea_info);
@@ -528,14 +540,24 @@ ssize_t ntfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	mutex_lock(&NTFS_I(inode)->mrec_lock);
 	ea_info = ntfs_attr_readall(ni, AT_EA_INFORMATION, NULL, 0,
 			&ea_info_size);
-	if (!ea_info || ea_info_size != sizeof(struct ea_information))
+	if (IS_ERR(ea_info)) {
+		err = PTR_ERR(ea_info);
+		ea_info = NULL;
 		goto out;
+	}
+	if (ea_info_size != sizeof(struct ea_information)) {
+		err = -EIO;
+		goto out;
+	}
 
 	ea_info_qsize = le32_to_cpu(ea_info->ea_query_length);
 
 	ea_buf = ntfs_attr_readall(ni, AT_EA, NULL, 0, &ea_buf_size);
-	if (!ea_buf)
+	if (IS_ERR(ea_buf)) {
+		err = PTR_ERR(ea_buf);
+		ea_buf = NULL;
 		goto out;
+	}
 
 	if (ea_info_qsize > ea_buf_size || ea_info_qsize == 0)
 		goto out;
@@ -743,15 +765,36 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 	old_arec_size = le32_to_cpu(a->length);
 
 	/*
-	 * Move payloads before shrinking the record.  Otherwise resizing moves
+	 * Move payloads before shrinking the record. Otherwise resizing moves
 	 * the following attribute over the old payload before it can be copied.
+	 *
+	 * When offsets increase, move mapping_pairs first to avoid name
+	 * overwriting the start of mapping_pairs.
 	 */
 	if (arec_size < old_arec_size) {
-		if (a->name_length && name_ofs != old_name_ofs)
-			memmove((u8 *)a + name_ofs, (u8 *)a + old_name_ofs,
-				a->name_length * sizeof(__le16));
-		if (mp_ofs != old_mp_ofs)
-			memmove((u8 *)a + mp_ofs, (u8 *)a + old_mp_ofs, mp_size);
+		if (name_ofs > old_name_ofs) {
+			/* Payload offsets increased: move mapping pairs first. */
+			if (mp_ofs != old_mp_ofs)
+				memmove((u8 *)a + mp_ofs,
+						(u8 *)a + old_mp_ofs,
+						mp_size);
+			if (a->name_length && name_ofs != old_name_ofs)
+				memmove((u8 *)a + name_ofs,
+						(u8 *)a + old_name_ofs,
+						a->name_length *
+							sizeof(__le16));
+		} else {
+			/* Payload offsets decreased or unchanged: move name first. */
+			if (a->name_length && name_ofs != old_name_ofs)
+				memmove((u8 *)a + name_ofs,
+						(u8 *)a + old_name_ofs,
+						a->name_length *
+							sizeof(__le16));
+			if (mp_ofs != old_mp_ofs)
+				memmove((u8 *)a + mp_ofs,
+						(u8 *)a + old_mp_ofs,
+						mp_size);
+		}
 	}
 
 	err = ntfs_attr_record_resize(ctx->mrec, a, arec_size);

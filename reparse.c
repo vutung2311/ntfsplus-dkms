@@ -288,10 +288,11 @@ int ntfs_parse_reparse(struct ntfs_inode *ni, unsigned int *mode)
 
 	reparse_attr = ntfs_attr_readall(ni, AT_REPARSE_POINT, NULL, 0,
 					 &attr_size);
-	if (!reparse_attr) {
+	if (IS_ERR(reparse_attr)) {
+		err = PTR_ERR(reparse_attr);
 		ntfs_error(ni->vol->sb,
-			   "Failed to read reparse point.");
-		return -EIO;
+			   "Failed to read reparse point: %d.", err);
+		return err;
 	}
 	if (!valid_reparse_data(ni, reparse_attr, attr_size)) {
 		ntfs_error(ni->vol->sb, "Invalid reparse point.");
@@ -415,6 +416,8 @@ unsigned int ntfs_reparse_tag_dt_types(struct ntfs_volume *vol, unsigned long mr
 
 	reparse_attr = (struct reparse_point *)ntfs_attr_readall(NTFS_I(vi),
 			AT_REPARSE_POINT, NULL, 0, &attr_size);
+	if (IS_ERR(reparse_attr))
+		reparse_attr = NULL;
 
 	if (reparse_attr && attr_size >= sizeof(*reparse_attr)) {
 		switch (reparse_attr->reparse_tag) {

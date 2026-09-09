@@ -510,7 +510,7 @@ static struct ntfs_inode *__ntfs_create(struct user_namespace *mnt_userns, struc
 	mark_inode_dirty(dir);
 
 	err = ntfs_mft_record_alloc(dir_ni->vol, mode, &ni, NULL,
-				    &ni_mrec);
+			&ni_mrec, -1);
 	if (err) {
 		iput(vi);
 		return ERR_PTR(err);
@@ -770,12 +770,17 @@ err_out:
 	return ERR_PTR(err);
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 3, 0)
+static int ntfs_create(struct mnt_idmap *idmap, struct inode *dir,
+		struct dentry *dentry, umode_t mode)
+#else
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 static int ntfs_create(struct mnt_idmap *idmap, struct inode *dir,
 		struct dentry *dentry, umode_t mode, bool excl)
 #else
 static int ntfs_create(struct user_namespace *mnt_userns, struct inode *dir,
 		struct dentry *dentry, umode_t mode, bool excl)
+#endif
 #endif
 {
 	struct ntfs_volume *vol = NTFS_SB(dir->i_sb);
