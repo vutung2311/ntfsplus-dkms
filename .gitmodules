@@ -1,0 +1,4 @@
+[submodule "linux-ntfs"]
+	path = linux-ntfs
+	url = https://github.com/namjaejeon/linux-ntfs.git
+	branch = ntfs-next

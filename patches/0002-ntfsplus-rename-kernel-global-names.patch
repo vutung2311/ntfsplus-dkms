@@ -1,0 +1,75 @@
+From: Tung Vu <vutung2311@gmail.com>
+Subject: [PATCH] ntfsplus: rename kernel-global names to coexist with in-tree ntfs
+
+Kernels 7.x ship this same driver in-tree as "ntfs", and ntfs3 can also
+claim the "ntfs" alias. Rename every name that is global to the running
+kernel so ntfsplus.ko can be loaded next to them:
+
+ - filesystem type and fs alias: ntfs -> ntfsplus
+ - slab caches: ntfs_*_cache -> ntfsplus_*_cache. ntfs_big_inode_cache
+   has a constructor, so SLUB never merges it and registers
+   /sys/kernel/slab/<name> directly; a duplicate name there fails
+   kmem_cache_create() and therefore module init.
+ - background workqueue: ntfs-bg-io -> ntfsplus-bg-io (cosmetic, makes
+   it distinguishable in ps/workqueue listings)
+ - debug sysctl: fs/ntfs/ntfs-debug -> fs/ntfs/ntfsplus-debug
+
+diff --git a/super.c b/super.c
+index 3943ec2..b7a1607 100644
+--- a/super.c
++++ b/super.c
+@@ -2785,20 +2785,20 @@ static int ntfs_init_fs_context(struct fs_context *fc)
+ 
+ static struct file_system_type ntfs_fs_type = {
+ 	.owner                  = THIS_MODULE,
+-	.name                   = "ntfs",
++	.name                   = "ntfsplus",
+ 	.init_fs_context        = ntfs_init_fs_context,
+ 	.parameters             = ntfs_parameters,
+ 	.kill_sb                = kill_block_super,
+ 	.fs_flags               = FS_REQUIRES_DEV | FS_ALLOW_IDMAP,
+ };
+-MODULE_ALIAS_FS("ntfs");
++MODULE_ALIAS_FS("ntfsplus");
+ 
+ static int ntfs_workqueue_init(void)
+ {
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+-	ntfs_wq = alloc_workqueue("ntfs-bg-io", WQ_PERCPU, 0);
++	ntfs_wq = alloc_workqueue("ntfsplus-bg-io", WQ_PERCPU, 0);
+ #else
+-	ntfs_wq = alloc_workqueue("ntfs-bg-io", 0, 0);
++	ntfs_wq = alloc_workqueue("ntfsplus-bg-io", 0, 0);
+ #endif
+ 	if (!ntfs_wq)
+ 		return -ENOMEM;
+@@ -2812,11 +2812,11 @@ static void ntfs_workqueue_destroy(void)
+ }
+ 
+ /* Stable names for the slab caches. */
+-static const char ntfs_index_ctx_cache_name[] = "ntfs_index_ctx_cache";
+-static const char ntfs_attr_ctx_cache_name[] = "ntfs_attr_ctx_cache";
+-static const char ntfs_name_cache_name[] = "ntfs_name_cache";
+-static const char ntfs_inode_cache_name[] = "ntfs_inode_cache";
+-static const char ntfs_big_inode_cache_name[] = "ntfs_big_inode_cache";
++static const char ntfs_index_ctx_cache_name[] = "ntfsplus_index_ctx_cache";
++static const char ntfs_attr_ctx_cache_name[] = "ntfsplus_attr_ctx_cache";
++static const char ntfs_name_cache_name[] = "ntfsplus_name_cache";
++static const char ntfs_inode_cache_name[] = "ntfsplus_inode_cache";
++static const char ntfs_big_inode_cache_name[] = "ntfsplus_big_inode_cache";
+ 
+ static int __init init_ntfs_fs(void)
+ {
+diff --git a/sysctl.c b/sysctl.c
+index 9062d41..8e1832a 100644
+--- a/sysctl.c
++++ b/sysctl.c
+@@ -26,7 +26,7 @@ static const struct ctl_table ntfs_sysctls[] = {
+ static struct ctl_table ntfs_sysctls[] = {
+ #endif
+ 	{
+-		.procname	= "ntfs-debug",
++		.procname	= "ntfsplus-debug",
+ 		.data		= &debug_msgs,		/* Data pointer and size. */
+ 		.maxlen		= sizeof(debug_msgs),
+ 		.mode		= 0644,			/* Mode, proc handler. */

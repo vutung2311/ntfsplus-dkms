@@ -2,7 +2,7 @@
 /*
  * Pocessing of EA's
  *
- * Part of this file is based on code from the NTFS-3G project.
+ * Part of this file is based on code from the NTFS-3G.
  *
  * Copyright (c) 2014-2021 Jean-Pierre Andre
  * Copyright (c) 2025 LG Electronics Co., Ltd.
@@ -18,9 +18,8 @@
 #include "index.h"
 #include "dir.h"
 #include "ea.h"
-#include "malloc.h"
 
-static int ntfs_write_ea(struct ntfs_inode *ni, int type, char *value, s64 ea_off,
+static int ntfs_write_ea(struct ntfs_inode *ni, __le32 type, char *value, s64 ea_off,
 		s64 ea_size, bool need_truncate)
 {
 	struct inode *ea_vi;
@@ -47,40 +46,39 @@ static int ntfs_write_ea(struct ntfs_inode *ni, int type, char *value, s64 ea_of
 }
 
 static int ntfs_ea_lookup(char *ea_buf, s64 ea_buf_size, const char *name,
-		int name_len, s64 *ea_offset, s64 *ea_size)
+			  int name_len, s64 *ea_offset, s64 *ea_size)
 {
 	const struct ea_attr *p_ea;
-	s64 offset;
+	size_t actual_size;
+	loff_t offset, p_ea_size;
 	unsigned int next;
-
-	if (ea_buf_size < sizeof(struct ea_attr))
-		goto out;
 
 	offset = 0;
 	do {
+		if (ea_buf_size - offset < sizeof(struct ea_attr))
+			break;
+
 		p_ea = (const struct ea_attr *)&ea_buf[offset];
 		next = le32_to_cpu(p_ea->next_entry_offset);
+		p_ea_size = next ? next : (ea_buf_size - offset);
 
-		if (offset + next > ea_buf_size ||
-		    ((1 + p_ea->ea_name_length) > (ea_buf_size - offset)))
+		if (p_ea_size < sizeof(struct ea_attr) ||
+		    offset + p_ea_size > ea_buf_size)
+			break;
+
+		if ((s64)p_ea->ea_name_length + 1 >
+		    p_ea_size - offsetof(struct ea_attr, ea_name))
+			break;
+
+		actual_size = ALIGN(struct_size(p_ea, ea_name, 1 + p_ea->ea_name_length +
+					le16_to_cpu(p_ea->ea_value_length)), 4);
+		if (actual_size > p_ea_size)
 			break;
 
 		if (p_ea->ea_name_length == name_len &&
 		    !memcmp(p_ea->ea_name, name, name_len)) {
 			*ea_offset = offset;
-			if (next)
-				*ea_size = next;
-			else {
-				unsigned int ea_len = 1 + p_ea->ea_name_length +
-						le16_to_cpu(p_ea->ea_value_length);
-
-				if ((ea_buf_size - offset) < ea_len)
-					goto out;
-
-				*ea_size = ALIGN(struct_size(p_ea, ea_name,
-							1 + p_ea->ea_name_length +
-							le16_to_cpu(p_ea->ea_value_length)), 4);
-			}
+			*ea_size = next ? next : actual_size;
 
 			if (ea_buf_size < *ea_offset + *ea_size)
 				goto out;
@@ -88,8 +86,7 @@ static int ntfs_ea_lookup(char *ea_buf, s64 ea_buf_size, const char *name,
 			return 0;
 		}
 		offset += next;
-	} while (next > 0 && offset < ea_buf_size &&
-		 sizeof(struct ea_attr) < (ea_buf_size - offset));
+	} while (next > 0 && offset < ea_buf_size);
 
 out:
 	return -ENOENT;
@@ -116,7 +113,8 @@ static int ntfs_get_ea(struct inode *inode, const char *name, size_t name_len,
 	char *ea_buf;
 	s64 ea_off, ea_size, all_ea_size, ea_info_size;
 	int err;
-	unsigned short int ea_value_len, ea_info_qlen;
+	u32 ea_info_qlen;
+	u16 ea_value_len;
 	struct ea_information *p_ea_info;
 
 	if (!NInoHasEA(ni))
@@ -124,17 +122,24 @@ static int ntfs_get_ea(struct inode *inode, const char *name, size_t name_len,
 
 	p_ea_info = ntfs_attr_readall(ni, AT_EA_INFORMATION, NULL, 0,
 			&ea_info_size);
-	if (!p_ea_info || ea_info_size != sizeof(struct ea_information)) {
-		ntfs_free(p_ea_info);
-		return -ENODATA;
+	if (IS_ERR(p_ea_info))
+		return PTR_ERR(p_ea_info);
+	if (ea_info_size != sizeof(struct ea_information)) {
+		kvfree(p_ea_info);
+		return -EIO;
 	}
 
-	ea_info_qlen = le16_to_cpu(p_ea_info->ea_query_length);
-	ntfs_free(p_ea_info);
+	ea_info_qlen = le32_to_cpu(p_ea_info->ea_query_length);
+	kvfree(p_ea_info);
 
 	ea_buf = ntfs_attr_readall(ni, AT_EA, NULL, 0, &all_ea_size);
-	if (!ea_buf)
-		return -ENODATA;
+	if (IS_ERR(ea_buf))
+		return PTR_ERR(ea_buf);
+
+	if (ea_info_qlen > all_ea_size) {
+		err = -EIO;
+		goto free_ea_buf;
+	}
 
 	err = ntfs_ea_lookup(ea_buf, ea_info_qlen, name, name_len, &ea_off,
 			&ea_size);
@@ -142,7 +147,7 @@ static int ntfs_get_ea(struct inode *inode, const char *name, size_t name_len,
 		p_ea = (struct ea_attr *)&ea_buf[ea_off];
 		ea_value_len = le16_to_cpu(p_ea->ea_value_length);
 		if (!buffer) {
-			ntfs_free(ea_buf);
+			kvfree(ea_buf);
 			return ea_value_len;
 		}
 
@@ -153,13 +158,13 @@ static int ntfs_get_ea(struct inode *inode, const char *name, size_t name_len,
 
 		memcpy(buffer, &p_ea->ea_name[p_ea->ea_name_length + 1],
 				ea_value_len);
-		ntfs_free(ea_buf);
+		kvfree(ea_buf);
 		return ea_value_len;
 	}
 
 	err = -ENODATA;
 free_ea_buf:
-	ntfs_free(ea_buf);
+	kvfree(ea_buf);
 	return err;
 }
 
@@ -191,8 +196,11 @@ static int ntfs_set_ea(struct inode *inode, const char *name, size_t name_len,
 	struct ea_information *p_ea_info = NULL;
 	int ea_packed, err = 0;
 	struct ea_attr *p_ea;
-	unsigned short int ea_info_qsize = 0;
+	u32 ea_info_qsize = 0;
 	char *ea_buf = NULL;
+	char *new_ea_buf;
+	char *old_ea_buf = NULL;
+	struct ea_information old_ea_info;
 	size_t new_ea_size = ALIGN(struct_size(p_ea, ea_name, 1 + name_len + val_size), 4);
 	s64 ea_off, ea_info_size, all_ea_size, ea_size;
 
@@ -202,20 +210,32 @@ static int ntfs_set_ea(struct inode *inode, const char *name, size_t name_len,
 	if (ntfs_attr_exist(ni, AT_EA_INFORMATION, AT_UNNAMED, 0)) {
 		p_ea_info = ntfs_attr_readall(ni, AT_EA_INFORMATION, NULL, 0,
 						&ea_info_size);
-		if (!p_ea_info || ea_info_size != sizeof(struct ea_information))
+		if (IS_ERR(p_ea_info)) {
+			err = PTR_ERR(p_ea_info);
+			p_ea_info = NULL;
 			goto out;
+		}
+		if (ea_info_size != sizeof(struct ea_information)) {
+			err = -EIO;
+			goto out;
+		}
 
 		ea_buf = ntfs_attr_readall(ni, AT_EA, NULL, 0, &all_ea_size);
+		if (IS_ERR(ea_buf)) {
+			err = PTR_ERR(ea_buf);
+			ea_buf = NULL;
+			goto out;
+		}
 		if (!ea_buf) {
 			ea_info_qsize = 0;
-			ntfs_free(p_ea_info);
+			kvfree(p_ea_info);
 			goto create_ea_info;
 		}
 
 		ea_info_qsize = le32_to_cpu(p_ea_info->ea_query_length);
 	} else {
 create_ea_info:
-		p_ea_info = ntfs_malloc_nofs(sizeof(struct ea_information));
+		p_ea_info = kzalloc(sizeof(struct ea_information), GFP_NOFS);
 		if (!p_ea_info)
 			return -ENOMEM;
 
@@ -246,6 +266,32 @@ create_ea_info:
 			err = -EEXIST;
 			goto out;
 		}
+		if ((flags & XATTR_REPLACE) && !val_size) {
+			old_ea_info = *p_ea_info;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
+			old_ea_buf = kvmemdup(ea_buf, all_ea_size, GFP_NOFS);
+			if (!old_ea_buf) {
+				err = -ENOMEM;
+				goto out;
+			}
+#else
+			old_ea_buf = kvmalloc(all_ea_size, GFP_NOFS);
+			if (!old_ea_buf) {
+				err = -ENOMEM;
+				goto out;
+			}
+
+			memcpy(old_ea_buf, ea_buf, all_ea_size);
+#endif
+		}
+
+		/* Check the final $EA size before removing the old entry. */
+		if (val_size &&
+		    ntfs_attr_size_bounds_check(ni->vol, AT_EA,
+					ea_info_qsize - ea_size + new_ea_size)) {
+			err = -EFBIG;
+			goto out;
+		}
 
 		p_ea = (struct ea_attr *)(ea_buf + ea_off);
 
@@ -262,19 +308,41 @@ create_ea_info:
 
 		memmove((char *)p_ea, (char *)p_ea + ea_size, ea_info_qsize - (ea_off + ea_size));
 		ea_info_qsize -= ea_size;
-		p_ea_info->ea_query_length = cpu_to_le16(ea_info_qsize);
+		p_ea_info->ea_query_length = cpu_to_le32(ea_info_qsize);
 
-		err = ntfs_write_ea(ni, AT_EA_INFORMATION, (char *)p_ea_info, 0,
-				sizeof(struct ea_information), false);
-		if (err)
-			goto out;
+		if ((flags & XATTR_REPLACE) && !val_size && !ea_info_qsize) {
+			err = ntfs_attr_remove(ni, AT_EA, AT_UNNAMED, 0);
+			if (err)
+				goto out;
 
-		err = ntfs_write_ea(ni, AT_EA, ea_buf, 0, ea_info_qsize, true);
-		if (err)
+			err = ntfs_attr_remove(ni, AT_EA_INFORMATION, AT_UNNAMED, 0);
+			if (err) {
+				/* Restore the original $EA if $EA_INFORMATION removal failed. */
+				ntfs_attr_add(ni, AT_EA, AT_UNNAMED, 0, old_ea_buf,
+					      all_ea_size);
+				ea_info_qsize = le32_to_cpu(old_ea_info.ea_query_length);
+			}
 			goto out;
+		}
 
 		if ((flags & XATTR_REPLACE) && !val_size) {
-			/* Remove xattr. */
+			err = ntfs_write_ea(ni, AT_EA, ea_buf, 0, ea_info_qsize,
+					true);
+			if (err) {
+				ntfs_write_ea(ni, AT_EA, old_ea_buf, 0,
+					      all_ea_size, false);
+				goto out;
+			}
+
+			err = ntfs_write_ea(ni, AT_EA_INFORMATION, (char *)p_ea_info,
+					0, sizeof(struct ea_information), false);
+			if (err) {
+				ntfs_write_ea(ni, AT_EA, old_ea_buf, 0,
+					      all_ea_size, false);
+				ntfs_write_ea(ni, AT_EA_INFORMATION,
+					      (char *)&old_ea_info, 0,
+					      sizeof(old_ea_info), false);
+			}
 			goto out;
 		}
 	} else {
@@ -282,22 +350,30 @@ create_ea_info:
 			err = -ENODATA;
 			goto out;
 		}
-	}
-	ntfs_free(ea_buf);
 
+		if (ntfs_attr_size_bounds_check(ni->vol, AT_EA,
+					ea_info_qsize + new_ea_size)) {
+			err = -EFBIG;
+			goto out;
+		}
+	}
 alloc_new_ea:
-	ea_buf = kzalloc(new_ea_size, GFP_NOFS);
-	if (!ea_buf) {
+	new_ea_buf = kvzalloc(ea_info_qsize + new_ea_size, GFP_NOFS);
+	if (!new_ea_buf) {
 		err = -ENOMEM;
 		goto out;
 	}
+	if (ea_info_qsize)
+		memcpy(new_ea_buf, ea_buf, ea_info_qsize);
+	kvfree(ea_buf);
+	ea_buf = new_ea_buf;
+	p_ea = (struct ea_attr *)(ea_buf + ea_info_qsize);
 
 	/*
 	 * EA and REPARSE_POINT compatibility not checked any more,
 	 * required by Windows 10, but having both may lead to
 	 * problems with earlier versions.
 	 */
-	p_ea = (struct ea_attr *)ea_buf;
 	memcpy(p_ea->ea_name, name, name_len);
 	p_ea->ea_name_length = name_len;
 	p_ea->ea_name[name_len] = 0;
@@ -309,8 +385,7 @@ alloc_new_ea:
 	p_ea_info->ea_length = cpu_to_le16(ea_packed);
 	p_ea_info->ea_query_length = cpu_to_le32(ea_info_qsize + new_ea_size);
 
-	if (ea_packed > 0xffff ||
-	    ntfs_attr_size_bounds_check(ni->vol, AT_EA, new_ea_size)) {
+	if (ea_packed > 0xffff) {
 		err = -EFBIG;
 		goto out;
 	}
@@ -319,13 +394,13 @@ alloc_new_ea:
 	 * no EA or EA_INFORMATION : add them
 	 */
 	if (!ntfs_attr_exist(ni, AT_EA, AT_UNNAMED, 0)) {
-		err = ntfs_attr_add(ni, AT_EA, AT_UNNAMED, 0, (char *)p_ea,
-				new_ea_size);
+		err = ntfs_attr_add(ni, AT_EA, AT_UNNAMED, 0, ea_buf,
+				ea_info_qsize + new_ea_size);
 		if (err)
 			goto out;
 	} else {
-		err = ntfs_write_ea(ni, AT_EA, (char *)p_ea, ea_info_qsize,
-				new_ea_size, false);
+		err = ntfs_write_ea(ni, AT_EA, ea_buf, 0,
+				ea_info_qsize + new_ea_size, true);
 		if (err)
 			goto out;
 	}
@@ -339,13 +414,16 @@ alloc_new_ea:
 		*packed_ea_size = p_ea_info->ea_length;
 	mark_mft_record_dirty(ni);
 out:
-	if (ea_info_qsize > 0)
-		NInoSetHasEA(ni);
-	else
-		NInoClearHasEA(ni);
+	if (!err) {
+		if (ea_info_qsize > 0)
+			NInoSetHasEA(ni);
+		else
+			NInoClearHasEA(ni);
+	}
 
-	ntfs_free(ea_buf);
-	ntfs_free(p_ea_info);
+	kvfree(ea_buf);
+	kvfree(old_ea_buf);
+	kvfree(p_ea_info);
 
 	return err;
 }
@@ -354,33 +432,35 @@ out:
  * Check for the presence of an EA "$LXDEV" (used by WSL)
  * and return its value as a device address
  */
-int ntfs_ea_get_wsl_inode(struct inode *inode, dev_t *rdevp, unsigned int flags)
+int ntfs_ea_get_wsl_inode(struct inode *inode, dev_t *rdevp, unsigned int flags,
+			  bool *has_lxmod)
 {
 	int err;
 	__le32 v;
+
+	*has_lxmod = false;
 
 	if (!(flags & NTFS_VOL_UID)) {
 		/* Load uid to lxuid EA */
 		err = ntfs_get_ea(inode, "$LXUID", sizeof("$LXUID") - 1, &v,
 				sizeof(v));
-		if (err < 0)
-			return err;
-		i_uid_write(inode, le32_to_cpu(v));
+		if (err == sizeof(v))
+			i_uid_write(inode, le32_to_cpu(v));
 	}
 
-	if (!(flags & NTFS_VOL_UID)) {
+	if (!(flags & NTFS_VOL_GID)) {
 		/* Load gid to lxgid EA */
 		err = ntfs_get_ea(inode, "$LXGID", sizeof("$LXGID") - 1, &v,
 				sizeof(v));
-		if (err < 0)
-			return err;
-		i_gid_write(inode, le32_to_cpu(v));
+		if (err == sizeof(v))
+			i_gid_write(inode, le32_to_cpu(v));
 	}
 
 	/* Load mode to lxmod EA */
 	err = ntfs_get_ea(inode, "$LXMOD", sizeof("$LXMOD") - 1, &v, sizeof(v));
-	if (err > 0) {
+	if (err == sizeof(v)) {
 		inode->i_mode = le32_to_cpu(v);
+		*has_lxmod = true;
 	} else {
 		/* Everyone gets all permissions. */
 		inode->i_mode |= 0777;
@@ -388,7 +468,7 @@ int ntfs_ea_get_wsl_inode(struct inode *inode, dev_t *rdevp, unsigned int flags)
 
 	/* Load mode to lxdev EA */
 	err = ntfs_get_ea(inode, "$LXDEV", sizeof("$LXDEV") - 1, &v, sizeof(v));
-	if (err > 0)
+	if (err == sizeof(v))
 		*rdevp = le32_to_cpu(v);
 	err = 0;
 
@@ -399,7 +479,10 @@ int ntfs_ea_set_wsl_inode(struct inode *inode, dev_t rdev, __le16 *ea_size,
 		unsigned int flags)
 {
 	__le32 v;
-	int err;
+	int err = 0;
+
+	if (ea_size)
+		*ea_size = 0;
 
 	if (flags & NTFS_EA_UID) {
 		/* Store uid to lxuid EA */
@@ -443,8 +526,10 @@ ssize_t ntfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	struct ntfs_inode *ni = NTFS_I(inode);
 	const struct ea_attr *p_ea;
 	s64 offset, ea_buf_size, ea_info_size;
-	int next, err = 0, ea_size;
-	unsigned int ea_info_qsize;
+	s64 ea_size;
+	u32 next;
+	int err = 0;
+	u32 ea_info_qsize;
 	char *ea_buf = NULL;
 	ssize_t ret = 0;
 	struct ea_information *ea_info;
@@ -455,43 +540,56 @@ ssize_t ntfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 	mutex_lock(&NTFS_I(inode)->mrec_lock);
 	ea_info = ntfs_attr_readall(ni, AT_EA_INFORMATION, NULL, 0,
 			&ea_info_size);
-	if (!ea_info || ea_info_size != sizeof(struct ea_information))
+	if (IS_ERR(ea_info)) {
+		err = PTR_ERR(ea_info);
+		ea_info = NULL;
 		goto out;
+	}
+	if (ea_info_size != sizeof(struct ea_information)) {
+		err = -EIO;
+		goto out;
+	}
 
-	ea_info_qsize = le16_to_cpu(ea_info->ea_query_length);
+	ea_info_qsize = le32_to_cpu(ea_info->ea_query_length);
 
 	ea_buf = ntfs_attr_readall(ni, AT_EA, NULL, 0, &ea_buf_size);
-	if (!ea_buf)
+	if (IS_ERR(ea_buf)) {
+		err = PTR_ERR(ea_buf);
+		ea_buf = NULL;
 		goto out;
+	}
 
-	if (ea_info_qsize > ea_buf_size)
-		goto out;
-
-	if (ea_buf_size < sizeof(struct ea_attr))
+	if (ea_info_qsize > ea_buf_size || ea_info_qsize == 0)
 		goto out;
 
 	offset = 0;
 	do {
+		if (ea_info_qsize - offset < sizeof(struct ea_attr)) {
+			err = -EIO;
+			goto out;
+		}
+
 		p_ea = (const struct ea_attr *)&ea_buf[offset];
 		next = le32_to_cpu(p_ea->next_entry_offset);
-		if (next)
-			ea_size = next;
-		else
-			ea_size = ALIGN(struct_size(p_ea, ea_name,
-						1 + p_ea->ea_name_length +
-						le16_to_cpu(p_ea->ea_value_length)),
-					4);
-		if (buffer) {
-			if (offset + ea_size > ea_info_qsize)
-				break;
+		ea_size = next ? next : (ea_info_qsize - offset);
 
+		if (ea_size < sizeof(struct ea_attr) ||
+		    offset + ea_size > ea_info_qsize) {
+			err = -EIO;
+			goto out;
+		}
+
+		if ((int)p_ea->ea_name_length + 1 >
+			ea_size - offsetof(struct ea_attr, ea_name)) {
+			err = -EIO;
+			goto out;
+		}
+
+		if (buffer) {
 			if (ret + p_ea->ea_name_length + 1 > size) {
 				err = -ERANGE;
 				goto out;
 			}
-
-			if (p_ea->ea_name_length + 1 > (ea_info_qsize - offset))
-				break;
 
 			memcpy(buffer + ret, p_ea->ea_name, p_ea->ea_name_length);
 			buffer[ret + p_ea->ea_name_length] = 0;
@@ -499,13 +597,12 @@ ssize_t ntfs_listxattr(struct dentry *dentry, char *buffer, size_t size)
 
 		ret += p_ea->ea_name_length + 1;
 		offset += ea_size;
-	} while (next > 0 && offset < ea_info_qsize &&
-		 sizeof(struct ea_attr) < (ea_info_qsize - offset));
+	} while (next > 0 && offset < ea_info_qsize);
 
 out:
 	mutex_unlock(&NTFS_I(inode)->mrec_lock);
-	ntfs_free(ea_info);
-	ntfs_free(ea_buf);
+	kvfree(ea_info);
+	kvfree(ea_buf);
 
 	return err ? err : ret;
 }
@@ -530,10 +627,10 @@ static int ntfs_getxattr(const struct xattr_handler *handler,
 		if (!buffer) {
 			err = sizeof(u8);
 		} else if (size < sizeof(u8)) {
-			err = -ENODATA;
+			err = -ERANGE;
 		} else {
 			err = sizeof(u8);
-			*(u8 *)buffer = ni->flags;
+			*(u8 *)buffer = (u8)(le32_to_cpu(ni->flags) & 0x3F);
 		}
 		goto out;
 	}
@@ -543,7 +640,7 @@ static int ntfs_getxattr(const struct xattr_handler *handler,
 		if (!buffer) {
 			err = sizeof(u32);
 		} else if (size < sizeof(u32)) {
-			err = -ENODATA;
+			err = -ERANGE;
 		} else {
 			err = sizeof(u32);
 			*(u32 *)buffer = le32_to_cpu(ni->flags);
@@ -567,7 +664,8 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 	struct mft_record *m;
 	struct attr_record *a;
 	__le16 new_aflags;
-	int mp_size, mp_ofs, name_ofs, arec_size, err;
+	u16 old_name_ofs, old_mp_ofs;
+	int mp_size, mp_ofs, name_ofs, old_arec_size, arec_size, err;
 
 	m = map_mft_record(ni);
 	if (IS_ERR(m))
@@ -599,8 +697,10 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 	else
 		new_aflags &= ~ATTR_IS_COMPRESSED;
 
-	if (new_aflags == a->flags)
-		return 0;
+	if (new_aflags == a->flags) {
+		err = 0;
+		goto err_out;
+	}
 
 	if ((new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)) ==
 			  (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)) {
@@ -609,14 +709,41 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 		goto err_out;
 	}
 
-	if (!a->non_resident)
-		goto out;
+	if (!a->non_resident) {
+		if (!(new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED))) {
+			err = 0;
+			goto err_out;
+		}
 
-	if (a->data.non_resident.data_size) {
-		pr_err("Can't change sparsed/compressed for non-empty file");
-		err = -EOPNOTSUPP;
-		goto err_out;
+		if (le32_to_cpu(a->data.resident.value_length)) {
+			pr_err("Can't change sparse/compressed for non-empty file");
+			err = -EOPNOTSUPP;
+			goto err_out;
+		}
+
+		err = ntfs_attr_make_non_resident(ni, 0);
+		if (err)
+			goto err_out;
+
+		ntfs_attr_reinit_search_ctx(ctx);
+		err = ntfs_attr_lookup(ni->type, ni->name,
+				       ni->name_len, CASE_SENSITIVE,
+				       0, NULL, 0, ctx);
+		if (err) {
+			err = -EINVAL;
+			goto err_out;
+		}
+		a = ctx->attr;
+	} else {
+		if (a->data.non_resident.data_size) {
+			pr_err("Can't change sparsed/compressed for non-empty file");
+			err = -EOPNOTSUPP;
+			goto err_out;
+		}
 	}
+
+	old_name_ofs = le16_to_cpu(a->name_offset);
+	old_mp_ofs = le16_to_cpu(a->data.non_resident.mapping_pairs_offset);
 
 	if (new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED))
 		name_ofs = (offsetof(struct attr_record,
@@ -635,10 +762,57 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 
 	mp_ofs = (name_ofs + a->name_length * sizeof(__le16) + 7) & ~7;
 	arec_size = (mp_ofs + mp_size + 7) & ~7;
+	old_arec_size = le32_to_cpu(a->length);
 
-	err = ntfs_attr_record_resize(m, a, arec_size);
+	/*
+	 * Move payloads before shrinking the record. Otherwise resizing moves
+	 * the following attribute over the old payload before it can be copied.
+	 *
+	 * When offsets increase, move mapping_pairs first to avoid name
+	 * overwriting the start of mapping_pairs.
+	 */
+	if (arec_size < old_arec_size) {
+		if (name_ofs > old_name_ofs) {
+			/* Payload offsets increased: move mapping pairs first. */
+			if (mp_ofs != old_mp_ofs)
+				memmove((u8 *)a + mp_ofs,
+						(u8 *)a + old_mp_ofs,
+						mp_size);
+			if (a->name_length && name_ofs != old_name_ofs)
+				memmove((u8 *)a + name_ofs,
+						(u8 *)a + old_name_ofs,
+						a->name_length *
+							sizeof(__le16));
+		} else {
+			/* Payload offsets decreased or unchanged: move name first. */
+			if (a->name_length && name_ofs != old_name_ofs)
+				memmove((u8 *)a + name_ofs,
+						(u8 *)a + old_name_ofs,
+						a->name_length *
+							sizeof(__le16));
+			if (mp_ofs != old_mp_ofs)
+				memmove((u8 *)a + mp_ofs,
+						(u8 *)a + old_mp_ofs,
+						mp_size);
+		}
+	}
+
+	err = ntfs_attr_record_resize(ctx->mrec, a, arec_size);
 	if (unlikely(err))
 		goto err_out;
+
+	/*
+	 * When compressed/sparse state changes, the non-resident header grows or
+	 * shrinks by the compressed_size field. Update the in-record payload layout
+	 * to match the new offsets before exposing the new mapping_pairs_offset.
+	 */
+	if (arec_size > old_arec_size) {
+		if (mp_ofs != old_mp_ofs)
+			memmove((u8 *)a + mp_ofs, (u8 *)a + old_mp_ofs, mp_size);
+		if (a->name_length)
+			memmove((u8 *)a + name_ofs, (u8 *)a + old_name_ofs,
+				a->name_length * sizeof(__le16));
+	}
 
 	if (new_aflags & (ATTR_IS_SPARSE | ATTR_IS_COMPRESSED)) {
 		a->data.non_resident.compression_unit = 0;
@@ -660,39 +834,56 @@ static int ntfs_new_attr_flags(struct ntfs_inode *ni, __le32 fattr)
 			ni->itype.compressed.block_size_bits = 0;
 			ni->itype.compressed.block_clusters = 0;
 		}
-
-		if (new_aflags & ATTR_IS_SPARSE) {
-			NInoSetSparse(ni);
-			ni->flags |= FILE_ATTR_SPARSE_FILE;
-		}
-
-		if (new_aflags & ATTR_IS_COMPRESSED) {
-			NInoSetCompressed(ni);
-			ni->flags |= FILE_ATTR_COMPRESSED;
-		}
 	} else {
-		ni->flags &= ~(FILE_ATTR_SPARSE_FILE | FILE_ATTR_COMPRESSED);
 		a->data.non_resident.compression_unit = 0;
-		NInoClearSparse(ni);
-		NInoClearCompressed(ni);
 	}
 
 	a->name_offset = cpu_to_le16(name_ofs);
 	a->data.non_resident.mapping_pairs_offset = cpu_to_le16(mp_ofs);
 
-out:
 	a->flags = new_aflags;
+
+	if (new_aflags & ATTR_IS_SPARSE) {
+		NInoSetSparse(ni);
+		ni->flags |= FILE_ATTR_SPARSE_FILE;
+	} else {
+		NInoClearSparse(ni);
+		ni->flags &= ~FILE_ATTR_SPARSE_FILE;
+	}
+
+	if (new_aflags & ATTR_IS_COMPRESSED) {
+		NInoSetCompressed(ni);
+		ni->flags |= FILE_ATTR_COMPRESSED;
+	} else {
+		NInoClearCompressed(ni);
+		ni->flags &= ~FILE_ATTR_COMPRESSED;
+	}
+
 	mark_mft_record_dirty(ctx->ntfs_ino);
 err_out:
-	ntfs_attr_put_search_ctx(ctx);
+	if (ctx)
+		ntfs_attr_put_search_ctx(ctx);
 	unmap_mft_record(ni);
 	return err;
 }
 
+static bool ntfs_is_reserved_lxattr(const char *name)
+{
+	return !strcmp(name, "$LXUID") || !strcmp(name, "$LXGID") ||
+	       !strcmp(name, "$LXMOD") || !strcmp(name, "$LXDEV");
+}
+
+#if LINUX_VERSION_CODE > KERNEL_VERSION(6, 3, 0)
 static int ntfs_setxattr(const struct xattr_handler *handler,
 		struct mnt_idmap *idmap, struct dentry *unused,
 		struct inode *inode, const char *name, const void *value,
 		size_t size, int flags)
+#else
+static int ntfs_setxattr(const struct xattr_handler *handler,
+		struct user_namespace *mnt_userns, struct dentry *unused,
+		struct inode *inode, const char *name, const void *value,
+		size_t size, int flags)
+#endif
 {
 	struct ntfs_inode *ni = NTFS_I(inode);
 	int err;
@@ -700,6 +891,9 @@ static int ntfs_setxattr(const struct xattr_handler *handler,
 
 	if (NVolShutdown(ni->vol))
 		return -EIO;
+
+	if (ntfs_is_reserved_lxattr(name) && !capable(CAP_SYS_ADMIN))
+		return -EPERM;
 
 	if (!strcmp(name, SYSTEM_DOS_ATTRIB)) {
 		if (sizeof(u8) != size) {
@@ -753,8 +947,14 @@ set_fattr:
 	mutex_unlock(&ni->mrec_lock);
 
 out:
-	inode_set_ctime_current(inode);
-	mark_inode_dirty(inode);
+	if (!err) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+		inode_set_ctime_current(inode);
+#else
+		inode->i_ctime = current_time(inode);
+#endif
+		mark_inode_dirty(inode);
+	}
 	return err;
 }
 
@@ -778,10 +978,15 @@ const struct xattr_handler * const ntfs_xattr_handlers[] = {
 // clang-format on
 
 #ifdef CONFIG_NTFS_FS_POSIX_ACL
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 4, 0)
 struct posix_acl *ntfs_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 			       int type)
 {
 	struct inode *inode = d_inode(dentry);
+#else
+struct posix_acl *ntfs_get_acl(struct inode *inode, int type, bool rcu)
+{
+#endif
 	struct ntfs_inode *ni = NTFS_I(inode);
 	const char *name;
 	size_t name_len;
@@ -789,8 +994,7 @@ struct posix_acl *ntfs_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	int err;
 	void *buf;
 
-	/* Allocate PATH_MAX bytes. */
-	buf = __getname();
+	buf = kmalloc(PATH_MAX, GFP_KERNEL);
 	if (!buf)
 		return ERR_PTR(-ENOMEM);
 
@@ -818,14 +1022,20 @@ struct posix_acl *ntfs_get_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 	if (!IS_ERR(acl))
 		set_cached_acl(inode, type, acl);
 
-	__putname(buf);
+	kfree(buf);
 
 	return acl;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 				    struct inode *inode, struct posix_acl *acl,
 				    int type, bool init_acl)
+#else
+static noinline int ntfs_set_acl_ex(struct user_namespace *mnt_userns,
+				    struct inode *inode, struct posix_acl *acl,
+				    int type, bool init_acl)
+#endif
 {
 	const char *name;
 	size_t size, name_len;
@@ -842,7 +1052,11 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 	case ACL_TYPE_ACCESS:
 		/* Do not change i_mode if we are in init_acl */
 		if (acl && !init_acl) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 			err = posix_acl_update_mode(idmap, inode, &mode, &acl);
+#else
+			err = posix_acl_update_mode(mnt_userns, inode, &mode, &acl);
+#endif
 			if (err)
 				return err;
 		}
@@ -867,6 +1081,11 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 		value = NULL;
 		flags = XATTR_REPLACE;
 	} else {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+		value = posix_acl_to_xattr(&init_user_ns, acl, &size, GFP_NOFS);
+		if (!value)
+			return -ENOMEM;
+#else
 		size = posix_acl_xattr_size(acl->a_count);
 		value = kmalloc(size, GFP_NOFS);
 		if (!value)
@@ -874,6 +1093,7 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 		err = posix_acl_to_xattr(&init_user_ns, acl, value, size);
 		if (err < 0)
 			goto out;
+#endif
 		flags = 0;
 	}
 
@@ -883,9 +1103,27 @@ static noinline int ntfs_set_acl_ex(struct mnt_idmap *idmap,
 	if (err == -ENODATA && !size)
 		err = 0; /* Removing non existed xattr. */
 	if (!err) {
-		set_cached_acl(inode, type, acl);
+		__le16 ea_size = 0;
+		umode_t old_mode = inode->i_mode;
+
 		inode->i_mode = mode;
+		mutex_lock(&NTFS_I(inode)->mrec_lock);
+		err = ntfs_ea_set_wsl_inode(inode, 0, &ea_size, NTFS_EA_MODE);
+		if (err) {
+			ntfs_set_ea(inode, name, name_len, NULL, 0,
+				    XATTR_REPLACE, NULL);
+			mutex_unlock(&NTFS_I(inode)->mrec_lock);
+			inode->i_mode = old_mode;
+			goto out;
+		}
+		mutex_unlock(&NTFS_I(inode)->mrec_lock);
+
+		set_cached_acl(inode, type, acl);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 		inode_set_ctime_current(inode);
+#else
+		inode->i_ctime = current_time(inode);
+#endif
 		mark_inode_dirty(inode);
 	}
 
@@ -895,14 +1133,27 @@ out:
 	return err;
 }
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 int ntfs_set_acl(struct mnt_idmap *idmap, struct dentry *dentry,
 		 struct posix_acl *acl, int type)
 {
 	return ntfs_set_acl_ex(idmap, d_inode(dentry), acl, type, false);
 }
+#else
+int ntfs_set_acl(struct user_namespace *mnt_userns, struct inode *inode,
+		 struct posix_acl *acl, int type)
+{
+	return ntfs_set_acl_ex(mnt_userns, inode, acl, type, false);
+}
+#endif
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 int ntfs_init_acl(struct mnt_idmap *idmap, struct inode *inode,
 		  struct inode *dir)
+#else
+int ntfs_init_acl(struct user_namespace *mnt_userns, struct inode *inode,
+		  struct inode *dir)
+#endif
 {
 	struct posix_acl *default_acl, *acl;
 	int err;
@@ -912,8 +1163,13 @@ int ntfs_init_acl(struct mnt_idmap *idmap, struct inode *inode,
 		return err;
 
 	if (default_acl) {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 		err = ntfs_set_acl_ex(idmap, inode, default_acl,
 				      ACL_TYPE_DEFAULT, true);
+#else
+		err = ntfs_set_acl_ex(mnt_userns, inode, default_acl,
+				      ACL_TYPE_DEFAULT, true);
+#endif
 		posix_acl_release(default_acl);
 	} else {
 		inode->i_default_acl = NULL;
@@ -921,8 +1177,13 @@ int ntfs_init_acl(struct mnt_idmap *idmap, struct inode *inode,
 
 	if (acl) {
 		if (!err)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 3, 0)
 			err = ntfs_set_acl_ex(idmap, inode, acl,
 					      ACL_TYPE_ACCESS, true);
+#else
+			err = ntfs_set_acl_ex(mnt_userns, inode, acl,
+					      ACL_TYPE_ACCESS, true);
+#endif
 		posix_acl_release(acl);
 	} else {
 		inode->i_acl = NULL;

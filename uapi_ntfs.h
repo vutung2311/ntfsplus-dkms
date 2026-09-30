@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 WITH Linux-syscall-note */
 /*
- * Copyright (c) 2025 LG Electronics Co., Ltd.
+ * Copyright (c) 2024 LG Electronics Co., Ltd.
  */
 
 #ifndef _UAPI_LINUX_NTFS_H
@@ -9,15 +9,15 @@
 #include <linux/ioctl.h>
 
 /*
- * ntfs-specific ioctl commands
+ * Shutdown the filesystem.
  */
-#define NTFS_IOC_SHUTDOWN _IOR('X', 125, __u32)
+#define FS_IOC_SHUTDOWN _IOR('X', 125, __u32)
 
 /*
- * Flags used by NTFS_IOC_SHUTDOWN
+ * Flags for FS_IOC_SHUTDOWN
  */
-#define NTFS_GOING_DOWN_DEFAULT        0x0     /* default with full sync */
-#define NTFS_GOING_DOWN_FULLSYNC       0x1     /* going down with full sync*/
-#define NTFS_GOING_DOWN_NOSYNC         0x2     /* going down */
+#define FS_SHUTDOWN_FLAGS_DEFAULT	0x0
+#define FS_SHUTDOWN_FLAGS_LOGFLUSH	0x1	/* flush log but not data*/
+#define FS_SHUTDOWN_FLAGS_NOLOGFLUSH	0x2	/* don't flush log nor data */
 
 #endif /* _UAPI_LINUX_NTFS_H */

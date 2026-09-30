@@ -1,0 +1,20 @@
+From: Tung Vu <vutung2311@gmail.com>
+Subject: [PATCH] ntfsplus: use WQ_UNBOUND for the background workqueue
+
+Carried from commit 3289bae of this packaging repo, which switched the
+6.18+ path from WQ_PERCPU (upstream) to WQ_UNBOUND. The original commit
+gave no rationale; kept as-is so runtime behaviour does not change.
+
+diff --git a/super.c b/super.c
+index b7a1607..1396be5 100644
+--- a/super.c
++++ b/super.c
+@@ -2796,7 +2796,7 @@ MODULE_ALIAS_FS("ntfsplus");
+ static int ntfs_workqueue_init(void)
+ {
+ #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 18, 0)
+-	ntfs_wq = alloc_workqueue("ntfsplus-bg-io", WQ_PERCPU, 0);
++	ntfs_wq = alloc_workqueue("ntfsplus-bg-io", WQ_UNBOUND, 0);
+ #else
+ 	ntfs_wq = alloc_workqueue("ntfsplus-bg-io", 0, 0);
+ #endif

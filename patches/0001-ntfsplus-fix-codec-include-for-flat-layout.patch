@@ -1,0 +1,33 @@
+From: Tung Vu <vutung2311@gmail.com>
+Subject: [PATCH] ntfsplus: fix codec header include for the flattened layout
+
+makepkg cannot take local sources from subdirectories, so the packaging
+copies upstream lib/*.c and lib/*.h next to the other sources. Include
+ntfs_codec.h from the same directory instead of the parent.
+
+diff --git a/lzx_decompress.c b/lzx_decompress.c
+index 0da24f6..16679ef 100644
+--- a/lzx_decompress.c
++++ b/lzx_decompress.c
+@@ -14,7 +14,7 @@
+ 
+ #include "decompress_common.h"
+ #include "lib.h"
+-#include "../ntfs_codec.h"
++#include "ntfs_codec.h"
+ 
+ /* Number of literal byte values. */
+ #define LZX_NUM_CHARS		256
+diff --git a/xpress_decompress.c b/xpress_decompress.c
+index fa83da7..762af21 100644
+--- a/xpress_decompress.c
++++ b/xpress_decompress.c
+@@ -15,7 +15,7 @@
+ 
+ #include "decompress_common.h"
+ #include "lib.h"
+-#include "../ntfs_codec.h"
++#include "ntfs_codec.h"
+ 
+ #define XPRESS_NUM_CHARS	256
+ #define XPRESS_NUM_SYMBOLS	512

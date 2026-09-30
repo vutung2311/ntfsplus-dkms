@@ -8,33 +8,119 @@
  */
 
 #include <linux/writeback.h>
-#include <linux/mpage.h>
-#include <linux/uio.h>
 
-#include "compat.h"
-#include "aops.h"
 #include "attrib.h"
 #include "mft.h"
 #include "ntfs.h"
 #include "debug.h"
 #include "iomap.h"
 
-static s64 lcn_from_index(struct ntfs_volume *vol, struct ntfs_inode *ni,
-		unsigned long index)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+static void ntfs_iomap_read_end_io(struct bio *bio)
 {
-	s64 vcn;
-	s64 lcn;
+	int error = blk_status_to_errno(bio->bi_status);
+	struct folio_iter iter;
 
-	vcn = NTFS_PIDX_TO_CLU(vol, index);
+	bio_for_each_folio_all(iter, bio) {
+		struct folio *folio = iter.folio;
+		struct ntfs_inode *ni = NTFS_I(folio->mapping->host);
+		s64 init_size;
+		loff_t pos = folio_pos(folio);
 
-	down_read(&ni->runlist.lock);
-	lcn = ntfs_attr_vcn_to_lcn_nolock(ni, vcn, false);
-	up_read(&ni->runlist.lock);
+		init_size = ni->initialized_size;
+		if (pos + iter.offset < init_size &&
+		    pos + iter.offset + iter.length > init_size)
+			folio_zero_segment(folio, offset_in_folio(folio, init_size),
+					   iter.offset + iter.length);
 
-	return lcn;
+		iomap_finish_folio_read(folio, iter.offset, iter.length, error);
+	}
+	bio_put(bio);
+}
+#endif
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 1, 0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 2, 0)
+static void ntfs_iomap_bio_submit_read(const struct iomap_iter *iter,
+		struct iomap_read_folio_ctx *ctx)
+{
+	iomap_bio_submit_read_endio(iter, ctx, ntfs_iomap_read_end_io);
+}
+#else
+static void ntfs_iomap_bio_submit_read(const struct iomap_iter *iter,
+		struct iomap_read_folio_ctx *ctx)
+{
+	struct bio *bio = ctx->read_ctx;
+
+	bio->bi_end_io = ntfs_iomap_read_end_io;
+	submit_bio(bio);
+}
+#endif
+
+static const struct iomap_read_ops ntfs_iomap_bio_read_ops = {
+	.read_folio_range	= iomap_bio_read_folio_range,
+	.submit_read		= ntfs_iomap_bio_submit_read,
+};
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+static int ntfs_iomap_bio_read_folio_range(const struct iomap_iter *iter,
+		struct iomap_read_folio_ctx *ctx, size_t plen)
+{
+	struct folio *folio = ctx->cur_folio;
+	const struct iomap *iomap = &iter->iomap;
+	loff_t pos = iter->pos;
+	size_t poff = offset_in_folio(folio, pos);
+	loff_t length = iomap_length(iter);
+	sector_t sector;
+	struct bio *bio = ctx->read_ctx;
+
+	sector = iomap_sector(iomap, pos);
+	if (!bio || bio_end_sector(bio) != sector ||
+	    !bio_add_folio(bio, folio, plen, poff)) {
+		gfp_t gfp = mapping_gfp_constraint(folio->mapping, GFP_KERNEL);
+		gfp_t orig_gfp = gfp;
+		unsigned int nr_vecs = DIV_ROUND_UP(length, PAGE_SIZE);
+
+		if (bio)
+			submit_bio(bio);
+
+		if (ctx->rac) /* same as readahead_gfp_mask */
+			gfp |= __GFP_NORETRY | __GFP_NOWARN;
+		bio = bio_alloc(iomap->bdev, bio_max_segs(nr_vecs), REQ_OP_READ,
+				     gfp);
+		/*
+		 * If the bio_alloc fails, try it again for a single page to
+		 * avoid having to deal with partial page reads.  This emulates
+		 * what do_mpage_read_folio does.
+		 */
+		if (!bio)
+			bio = bio_alloc(iomap->bdev, 1, REQ_OP_READ, orig_gfp);
+		if (ctx->rac)
+			bio->bi_opf |= REQ_RAHEAD;
+		bio->bi_iter.bi_sector = sector;
+		bio->bi_end_io = ntfs_iomap_read_end_io;
+		bio_add_folio_nofail(bio, folio, plen, poff);
+		ctx->read_ctx = bio;
+	}
+	return 0;
 }
 
-/**
+static void ntfs_iomap_bio_submit_read(struct iomap_read_folio_ctx *ctx)
+{
+	struct bio *bio = ctx->read_ctx;
+
+	if (bio)
+		submit_bio(bio);
+}
+
+static const struct iomap_read_ops ntfs_iomap_bio_read_ops = {
+	.read_folio_range	= ntfs_iomap_bio_read_folio_range,
+	.submit_read		= ntfs_iomap_bio_submit_read,
+};
+#endif
+#endif
+
+/*
  * ntfs_read_folio - Read data for a folio from the device
  * @file:	open file to which the folio @folio belongs or NULL
  * @folio:	page cache folio to fill with data
@@ -51,9 +137,79 @@ static s64 lcn_from_index(struct ntfs_volume *vol, struct ntfs_inode *ni,
  *
  * Return: 0 on success, or -errno on error.
  */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 static int ntfs_read_folio(struct file *file, struct folio *folio)
+#else
+static int ntfs_readpage(struct file *file, struct page *page)
+#endif
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 	struct ntfs_inode *ni = NTFS_I(folio->mapping->host);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+	struct iomap_read_folio_ctx ctx = {
+		.cur_folio = folio,
+		.ops = &ntfs_iomap_bio_read_ops,
+	};
+#endif
+
+	/*
+	 * Only $DATA attributes can be encrypted and only unnamed $DATA
+	 * attributes can be compressed.  Index root can have the flags set but
+	 * this means to create compressed/encrypted files, not that the
+	 * attribute is compressed/encrypted.  Note we need to check for
+	 * AT_INDEX_ALLOCATION since this is the type of both directory and
+	 * index inodes.
+	 */
+	if (ni->type != AT_INDEX_ALLOCATION) {
+		/*
+		 * EFS-encrypted files are not supported.
+		 * (decryption/encryption is not implemented yet)
+		 */
+		if (NInoEncrypted(ni)) {
+			folio_unlock(folio);
+			return -EOPNOTSUPP;
+		}
+		if (NInoWofCompressed(ni)) {
+#ifdef CONFIG_NTFS_FS_WOF_COMPRESSION
+			return ntfs_read_wof_compressed_block(folio);
+#else
+			folio_unlock(folio);
+			return -EOPNOTSUPP;
+#endif
+		}
+		/* Compressed data streams are handled in compress.c. */
+		if (NInoNonResident(ni) && NInoCompressed(ni))
+			return ntfs_read_compressed_block(folio);
+	}
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
+	struct page *page = &folio->page;
+#endif
+	loff_t i_size;
+	struct inode *vi;
+	struct ntfs_inode *ni;
+
+	BUG_ON(!PageLocked(page));
+	vi = page->mapping->host;
+	i_size = i_size_read(vi);
+	/* Is the page fully outside i_size? (truncate in progress) */
+	if (unlikely(page->index >= (i_size + PAGE_SIZE - 1) >>
+			PAGE_SHIFT)) {
+		zero_user(page, 0, PAGE_SIZE);
+		ntfs_debug("Read outside i_size - truncated?");
+		SetPageUptodate(page);
+		unlock_page(page);
+		return 0;
+	}
+	/*
+	 * This can potentially happen because we clear PageUptodate() during
+	 * ntfs_writepage() of MstProtected() attributes.
+	 */
+	if (PageUptodate(page)) {
+		unlock_page(page);
+		return 0;
+	}
+	ni = NTFS_I(vi);
 
 	/*
 	 * Only $DATA attributes can be encrypted and only unnamed $DATA
@@ -66,202 +222,131 @@ static int ntfs_read_folio(struct file *file, struct folio *folio)
 	if (ni->type != AT_INDEX_ALLOCATION) {
 		/* If attribute is encrypted, deny access, just like NT4. */
 		if (NInoEncrypted(ni)) {
-			folio_unlock(folio);
+			BUG_ON(ni->type != AT_DATA);
+			unlock_page(page);
 			return -EACCES;
 		}
 		/* Compressed data streams are handled in compress.c. */
-		if (NInoNonResident(ni) && NInoCompressed(ni))
-			return ntfs_read_compressed_block(folio);
-	}
-
-	iomap_bio_read_folio(folio, &ntfs_read_iomap_ops);
-	return 0;
-}
-
-void ntfs_bio_end_io(struct bio *bio)
-{
-	if (bio->bi_private)
-		folio_put((struct folio *)bio->bi_private);
-	bio_put(bio);
-}
-
-static int ntfs_write_mft_block(struct ntfs_inode *ni, struct folio *folio,
-		struct writeback_control *wbc)
-{
-	struct inode *vi = VFS_I(ni);
-	struct ntfs_volume *vol = ni->vol;
-	u8 *kaddr;
-	struct ntfs_inode *locked_nis[PAGE_SIZE / NTFS_BLOCK_SIZE];
-	int nr_locked_nis = 0, err = 0, mft_ofs, prev_mft_ofs;
-	struct bio *bio = NULL;
-	unsigned long mft_no;
-	struct ntfs_inode *tni;
-	s64 lcn;
-	s64 vcn = NTFS_PIDX_TO_CLU(vol, folio->index);
-	s64 end_vcn = NTFS_B_TO_CLU(vol, ni->allocated_size);
-	unsigned int folio_sz;
-	struct runlist_element *rl;
-
-	ntfs_debug("Entering for inode 0x%lx, attribute type 0x%x, folio index 0x%lx.",
-			vi->i_ino, ni->type, folio->index);
-
-	lcn = lcn_from_index(vol, ni, folio->index);
-	if (lcn <= LCN_HOLE) {
-		folio_start_writeback(folio);
-		folio_unlock(folio);
-		folio_end_writeback(folio);
-		return -EIO;
-	}
-
-	/* Map folio so we can access its contents. */
-	kaddr = kmap_local_folio(folio, 0);
-	/* Clear the page uptodate flag whilst the mst fixups are applied. */
-	folio_clear_uptodate(folio);
-
-	for (mft_ofs = 0; mft_ofs < PAGE_SIZE && vcn < end_vcn;
-	     mft_ofs += vol->mft_record_size) {
-		/* Get the mft record number. */
-		mft_no = (((s64)folio->index << PAGE_SHIFT) + mft_ofs) >>
-			vol->mft_record_size_bits;
-		vcn = NTFS_MFT_NR_TO_CLU(vol, mft_no);
-		/* Check whether to write this mft record. */
-		tni = NULL;
-		if (ntfs_may_write_mft_record(vol, mft_no,
-					(struct mft_record *)(kaddr + mft_ofs), &tni)) {
-			unsigned int mft_record_off = 0;
-			s64 vcn_off = vcn;
-
-			/*
-			 * Skip $MFT extent mft records and let them being written
-			 * by writeback to avioid deadlocks. the $MFT runlist
-			 * lock must be taken before $MFT extent mrec_lock is taken.
-			 */
-			if (tni && tni->nr_extents < 0 &&
-				tni->ext.base_ntfs_ino == NTFS_I(vol->mft_ino)) {
-				mutex_unlock(&tni->mrec_lock);
-				atomic_dec(&tni->count);
-				iput(vol->mft_ino);
-				continue;
-			}
-
-			/*
-			 * The record should be written.  If a locked ntfs
-			 * inode was returned, add it to the array of locked
-			 * ntfs inodes.
-			 */
-			if (tni)
-				locked_nis[nr_locked_nis++] = tni;
-
-			if (bio && (mft_ofs != prev_mft_ofs + vol->mft_record_size)) {
-flush_bio:
-				flush_dcache_folio(folio);
-				bio->bi_end_io = ntfs_bio_end_io;
-				submit_bio(bio);
-				bio = NULL;
-			}
-
-			if (vol->cluster_size < folio_size(folio)) {
-				down_write(&ni->runlist.lock);
-				rl = ntfs_attr_vcn_to_rl(ni, vcn_off, &lcn);
-				up_write(&ni->runlist.lock);
-				if (IS_ERR(rl) || lcn < 0) {
-					err = -EIO;
-					goto unm_done;
-				}
-
-				if (bio &&
-				   (bio_end_sector(bio) >> (vol->cluster_size_bits - 9)) !=
-				    lcn) {
-					flush_dcache_folio(folio);
-					bio->bi_end_io = ntfs_bio_end_io;
-					submit_bio(bio);
-					bio = NULL;
-				}
-			}
-
-			if (!bio) {
-				unsigned int off;
-
-				off = ((mft_no << vol->mft_record_size_bits) +
-				       mft_record_off) & vol->cluster_size_mask;
-
-				bio = bio_alloc(vol->sb->s_bdev, 1, REQ_OP_WRITE,
-						GFP_NOIO);
-				bio->bi_iter.bi_sector =
-					NTFS_B_TO_SECTOR(vol, NTFS_CLU_TO_B(vol, lcn) + off);
-			}
-
-			if (vol->cluster_size == NTFS_BLOCK_SIZE &&
-			    (mft_record_off ||
-			     rl->length - (vcn_off - rl->vcn) == 1 ||
-			     mft_ofs + NTFS_BLOCK_SIZE >= PAGE_SIZE))
-				folio_sz = NTFS_BLOCK_SIZE;
-			else
-				folio_sz = vol->mft_record_size;
-			if (!bio_add_folio(bio, folio, folio_sz,
-					   mft_ofs + mft_record_off)) {
-				err = -EIO;
-				bio_put(bio);
-				goto unm_done;
-			}
-			mft_record_off += folio_sz;
-
-			if (mft_record_off != vol->mft_record_size) {
-				vcn_off++;
-				goto flush_bio;
-			}
-			prev_mft_ofs = mft_ofs;
-
-			if (mft_no < vol->mftmirr_size)
-				ntfs_sync_mft_mirror(vol, mft_no,
-						(struct mft_record *)(kaddr + mft_ofs));
+		if (NInoNonResident(ni) && NInoCompressed(ni)) {
+			BUG_ON(ni->type != AT_DATA);
+			BUG_ON(ni->name_len);
+			return ntfs_read_compressed_block(page);
+		} else if (NInoWofCompressed(ni)) {
+			BUG_ON(ni->type != AT_DATA);
+			BUG_ON(ni->name_len);
+#ifdef CONFIG_NTFS_FS_WOF_COMPRESSION
+			return ntfs_read_wof_compressed_block(folio);
+#else
+			unlock_page(page);
+			return -EOPNOTSUPP;
+#endif
 		}
-
 	}
+#endif
 
-	if (bio) {
-		flush_dcache_folio(folio);
-		bio->bi_end_io = ntfs_bio_end_io;
-		submit_bio(bio);
-	}
-	flush_dcache_folio(folio);
-unm_done:
-	folio_mark_uptodate(folio);
-	kunmap_local(kaddr);
-
-	folio_start_writeback(folio);
-	folio_unlock(folio);
-	folio_end_writeback(folio);
-
-	/* Unlock any locked inodes. */
-	while (nr_locked_nis-- > 0) {
-		struct ntfs_inode *base_tni;
-
-		tni = locked_nis[nr_locked_nis];
-		mutex_unlock(&tni->mrec_lock);
-
-		/* Get the base inode. */
-		mutex_lock(&tni->extent_lock);
-		if (tni->nr_extents >= 0)
-			base_tni = tni;
-		else
-			base_tni = tni->ext.base_ntfs_ino;
-		mutex_unlock(&tni->extent_lock);
-		ntfs_debug("Unlocking %s inode 0x%lx.",
-				tni == base_tni ? "base" : "extent",
-				tni->mft_no);
-		atomic_dec(&tni->count);
-		iput(VFS_I(base_tni));
-	}
-
-	if (unlikely(err && err != -ENOMEM))
-		NVolSetErrors(vol);
-	if (likely(!err))
-		ntfs_debug("Done.");
-	return err;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+	iomap_read_folio(&ntfs_read_iomap_ops, &ctx, NULL);
+	return 0;
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+	iomap_read_folio(&ntfs_read_iomap_ops, &ctx);
+	return 0;
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	return iomap_read_folio(folio, &ntfs_read_iomap_ops);
+#else
+	return iomap_readpage(page, &ntfs_read_iomap_ops);
+#endif
+#endif
+#endif
 }
 
-/**
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+/*
+ * ntfs_writepage - write a @page to the backing store
+ * @page:	page cache page to write out
+ * @wbc:	writeback control structure
+ *
+ * This is called from the VM when it wants to have a dirty ntfs page cache
+ * page cleaned.  The VM has already locked the page and marked it clean.
+ *
+ * For non-resident attributes, ntfs_writepage() writes the @page by calling
+ * the ntfs version of the generic block_write_full_page() function,
+ * ntfs_write_block(), which in turn if necessary creates and writes the
+ * buffers associated with the page asynchronously.
+ *
+ * For resident attributes, OTOH, ntfs_writepage() writes the @page by copying
+ * the data to the mft record (which at this stage is most likely in memory).
+ * The mft record is then marked dirty and written out asynchronously via the
+ * vfs inode dirty code path for the inode the mft record belongs to or via the
+ * vm page dirty code path for the page the mft record is in.
+ *
+ * Based on ntfs_read_folio() and fs/buffer.c::block_write_full_page().
+ */
+static int ntfs_writepage(struct page *page, struct writeback_control *wbc)
+{
+	loff_t i_size;
+	struct inode *vi = page->mapping->host;
+	struct ntfs_inode *ni = NTFS_I(vi);
+	struct iomap_writepage_ctx wpc = { };
+
+	BUG_ON(!PageLocked(page));
+
+	if (!NInoNonResident(ni)) {
+		unlock_page(page);
+		return 0;
+	}
+
+	i_size = i_size_read(vi);
+	/* Is the page fully outside i_size? (truncate in progress) */
+	if (unlikely(page->index >= (i_size + PAGE_SIZE - 1) >>
+			PAGE_SHIFT)) {
+		/*
+		 * The page may have dirty, unmapped buffers.  Make them
+		 * freeable here, so the page does not leak.
+		 */
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+		struct folio *folio = page_folio(page);
+
+		iomap_invalidate_folio(folio, 0, PAGE_SIZE);
+#else
+		iomap_invalidatepage(page, 0, PAGE_SIZE);
+#endif
+		unlock_page(page);
+		ntfs_debug("Write outside i_size - truncated?");
+		return 0;
+	}
+	/*
+	 * Only $DATA attributes can be encrypted and only unnamed $DATA
+	 * attributes can be compressed.  Index root can have the flags set but
+	 * this means to create compressed/encrypted files, not that the
+	 * attribute is compressed/encrypted.  Note we need to check for
+	 * AT_INDEX_ALLOCATION since this is the type of both directory and
+	 * index inodes.
+	 */
+	if (ni->type != AT_INDEX_ALLOCATION) {
+		/* If file is encrypted, deny access, just like NT4. */
+		if (NInoEncrypted(ni)) {
+			unlock_page(page);
+			BUG_ON(ni->type != AT_DATA);
+			ntfs_debug("Denying write access to encrypted file.");
+			return -EACCES;
+		}
+		/* Compressed data streams are handled in compress.c. */
+		if (NInoNonResident(ni) && NInoCompressed(ni)) {
+			BUG_ON(ni->type != AT_DATA);
+			BUG_ON(ni->name_len);
+			unlock_page(page);
+			ntfs_error(vi->i_sb, "Writing to compressed files is not supported yet.  Sorry.");
+			return -EOPNOTSUPP;
+		}
+	}
+
+	return iomap_writepage(page, wbc, &wpc, &ntfs_writeback_ops);
+}
+#endif
+
+/*
  * ntfs_bmap - map logical file block to physical device block
  * @mapping:	address space mapping to which the block to be mapped belongs
  * @block:	logical block to map to its physical device block
@@ -295,14 +380,15 @@ static sector_t ntfs_bmap(struct address_space *mapping, sector_t block)
 	unsigned int delta;
 	unsigned char blocksize_bits;
 
-	ntfs_debug("Entering for mft_no 0x%lx, logical block 0x%llx.",
+	ntfs_debug("Entering for mft_no 0x%llx, logical block 0x%llx.",
 			ni->mft_no, (unsigned long long)block);
 	if (ni->type != AT_DATA || !NInoNonResident(ni) || NInoEncrypted(ni) ||
-	    NInoMstProtected(ni)) {
+	    NInoWofCompressed(ni) || NInoMstProtected(ni)) {
 		ntfs_error(vol->sb, "BMAP does not make sense for %s attributes, returning 0.",
 				(ni->type != AT_DATA) ? "non-data" :
 				(!NInoNonResident(ni) ? "resident" :
-				"encrypted"));
+				(NInoWofCompressed(ni) ? "WOF-compressed" :
+				"encrypted")));
 		return 0;
 	}
 	/* None of these can happen. */
@@ -321,7 +407,8 @@ static sector_t ntfs_bmap(struct address_space *mapping, sector_t block)
 	if (unlikely(ofs >= size || (ofs + blocksize > size && size < i_size)))
 		goto hole;
 	down_read(&ni->runlist.lock);
-	lcn = ntfs_attr_vcn_to_lcn_nolock(ni, NTFS_B_TO_CLU(vol, ofs), false);
+	lcn = ntfs_attr_vcn_to_lcn_nolock(ni, ntfs_bytes_to_cluster(vol, ofs),
+			false);
 	up_read(&ni->runlist.lock);
 	if (unlikely(lcn < LCN_HOLE)) {
 		/*
@@ -342,12 +429,12 @@ static sector_t ntfs_bmap(struct address_space *mapping, sector_t block)
 			goto hole;
 		case LCN_ENOMEM:
 			ntfs_error(vol->sb,
-				"Not enough memory to complete mapping for inode 0x%lx. Returning 0.",
+				"Not enough memory to complete mapping for inode 0x%llx. Returning 0.",
 				ni->mft_no);
 			break;
 		default:
 			ntfs_error(vol->sb,
-				"Failed to complete mapping for inode 0x%lx.  Run chkdsk. Returning 0.",
+				"Failed to complete mapping for inode 0x%llx.  Run chkdsk. Returning 0.",
 				ni->mft_no);
 			break;
 		}
@@ -365,7 +452,7 @@ hole:
 	 */
 	delta = ofs & vol->cluster_size_mask;
 	if (unlikely(sizeof(block) < sizeof(lcn))) {
-		block = lcn = (NTFS_CLU_TO_B(vol, lcn) + delta) >>
+		block = lcn = (ntfs_cluster_to_bytes(vol, lcn) + delta) >>
 				blocksize_bits;
 		/* If the block number was truncated return 0. */
 		if (unlikely(block != lcn)) {
@@ -375,7 +462,7 @@ hole:
 			return 0;
 		}
 	} else
-		block = (NTFS_CLU_TO_B(vol, lcn) + delta) >>
+		block = (ntfs_cluster_to_bytes(vol, lcn) + delta) >>
 				blocksize_bits;
 	ntfs_debug("Done (returning block 0x%llx).", (unsigned long long)lcn);
 	return block;
@@ -386,36 +473,30 @@ static void ntfs_readahead(struct readahead_control *rac)
 	struct address_space *mapping = rac->mapping;
 	struct inode *inode = mapping->host;
 	struct ntfs_inode *ni = NTFS_I(inode);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+	struct iomap_read_folio_ctx ctx = {
+		.ops = &ntfs_iomap_bio_read_ops,
+		.rac = rac,
+	};
+#endif
 
-	if (!NInoNonResident(ni) || NInoCompressed(ni)) {
-		/* No readahead for resident and compressed. */
+	/*
+	 * Resident files are not cached in the page cache,
+	 * and readahead is not implemented for compressed files.
+	 */
+	if (!NInoNonResident(ni) || NInoCompressed(ni) ||
+	    NInoWofCompressed(ni))
 		return;
-	}
 
-	iomap_bio_readahead(rac, &ntfs_read_iomap_ops);
-}
-
-static int ntfs_mft_writepage(struct folio *folio, struct writeback_control *wbc)
-{
-	struct address_space *mapping = folio->mapping;
-	struct inode *vi = mapping->host;
-	struct ntfs_inode *ni = NTFS_I(vi);
-	loff_t i_size;
-	int ret;
-
-	i_size = i_size_read(vi);
-
-	/* We have to zero every time due to mmap-at-end-of-file. */
-	if (folio->index >= (i_size >> PAGE_SHIFT)) {
-		/* The page straddles i_size. */
-		unsigned int ofs = i_size & ~PAGE_MASK;
-
-		folio_zero_segment(folio, ofs, PAGE_SIZE);
-	}
-
-	ret = ntfs_write_mft_block(ni, folio, wbc);
-	mapping_set_error(mapping, ret);
-	return ret;
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(7, 0, 0)
+	iomap_readahead(&ntfs_read_iomap_ops, &ctx, NULL);
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 19, 0)
+	iomap_readahead(&ntfs_read_iomap_ops, &ctx);
+#else
+	iomap_readahead(rac, &ntfs_read_iomap_ops);
+#endif
+#endif
 }
 
 static int ntfs_writepages(struct address_space *mapping,
@@ -423,11 +504,17 @@ static int ntfs_writepages(struct address_space *mapping,
 {
 	struct inode *inode = mapping->host;
 	struct ntfs_inode *ni = NTFS_I(inode);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
 	struct iomap_writepage_ctx wpc = {
 		.inode		= mapping->host,
 		.wbc		= wbc,
 		.ops		= &ntfs_writeback_ops,
 	};
+#else
+	struct iomap_writepage_ctx wpc = { };
+#endif
+	bool need_iput = false;
+	int ret;
 
 	if (NVolShutdown(ni->vol))
 		return -EIO;
@@ -435,116 +522,135 @@ static int ntfs_writepages(struct address_space *mapping,
 	if (!NInoNonResident(ni))
 		return 0;
 
-	if (NInoMstProtected(ni) && ni->mft_no == FILE_MFT) {
-		struct folio *folio = NULL;
-		int error;
-
-		while ((folio = writeback_iter(mapping, wbc, folio, &error)))
-			error = ntfs_mft_writepage(folio, wbc);
-		return error;
-	}
-
-	/* If file is encrypted, deny access, just like NT4. */
+	/*
+	 * EFS-encrypted files are not supported.
+	 * (decryption/encryption is not implemented yet)
+	 */
 	if (NInoEncrypted(ni)) {
-		ntfs_debug("Denying write access to encrypted file.");
-		return -EACCES;
+		ntfs_debug("Encrypted I/O not supported");
+		return -EOPNOTSUPP;
 	}
 
-	return iomap_writepages(&wpc);
+	/*
+	 * Prevent eviction in writeback to avoid deadlock in
+	 * ntfs_drop_big_inode().
+	 */
+	if ((ni->type == AT_DATA || ni->type == AT_INDEX_ALLOCATION) &&
+	    igrab(inode))
+		need_iput = true;
+
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 17, 0)
+	ret = iomap_writepages(&wpc);
+#else
+	ret = iomap_writepages(mapping, wbc, &wpc, &ntfs_writeback_ops);
+#endif
+
+	if (need_iput)
+		iput(inode);
+
+	return ret;
 }
 
 static int ntfs_swap_activate(struct swap_info_struct *sis,
 		struct file *swap_file, sector_t *span)
 {
+	if (NInoWofCompressed(NTFS_I(file_inode(swap_file))))
+		return -EOPNOTSUPP;
+
 	return iomap_swapfile_activate(sis, swap_file, span,
 			&ntfs_read_iomap_ops);
 }
 
 const struct address_space_operations ntfs_aops = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
 	.read_folio		= ntfs_read_folio,
+#else
+	.readpage		= ntfs_readpage,
+#endif
 	.readahead		= ntfs_readahead,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+	.writepage		= ntfs_writepage,
+#endif
 	.writepages		= ntfs_writepages,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
 	.direct_IO		= noop_direct_IO,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 	.dirty_folio		= iomap_dirty_folio,
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	.dirty_folio		= filemap_dirty_folio,
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+	.dirty_folio		= iomap_dirty_folio,
+#else
+	.set_page_dirty		= __set_page_dirty_nobuffers,
+#endif
+#endif
+#endif
 	.bmap			= ntfs_bmap,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
 	.migrate_folio		= filemap_migrate_folio,
+#else
+	.migratepage		= iomap_migrate_page,
+#endif
 	.is_partially_uptodate	= iomap_is_partially_uptodate,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
 	.error_remove_folio	= generic_error_remove_folio,
+#else
+	.error_remove_page	= generic_error_remove_page,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
 	.release_folio		= iomap_release_folio,
 	.invalidate_folio	= iomap_invalidate_folio,
+#else
+	.releasepage		= iomap_releasepage,
+	.invalidatepage		= iomap_invalidatepage,
+#endif
 	.swap_activate          = ntfs_swap_activate,
 };
 
-void mark_ntfs_record_dirty(struct folio *folio)
-{
-	iomap_dirty_folio(folio->mapping, folio);
-}
-
-int ntfs_dev_read(struct super_block *sb, void *buf, loff_t start, loff_t size)
-{
-	pgoff_t idx, idx_end;
-	loff_t offset, end = start + size;
-	u32 from, to, buf_off = 0;
-	struct folio *folio;
-
-	idx = start >> PAGE_SHIFT;
-	idx_end = end >> PAGE_SHIFT;
-	from = start & ~PAGE_MASK;
-
-	if (idx == idx_end)
-		idx_end++;
-
-	for (; idx < idx_end; idx++, from = 0) {
-		folio = read_mapping_folio(sb->s_bdev->bd_mapping, idx, NULL);
-		if (IS_ERR(folio)) {
-			ntfs_error(sb, "Unable to read %ld page", idx);
-			return PTR_ERR(folio);
-		}
-
-		offset = (loff_t)idx << PAGE_SHIFT;
-		to = min_t(u32, end - offset, PAGE_SIZE);
-
-		memcpy_from_folio(buf + buf_off, folio, from, to);
-		buf_off += to;
-		folio_put(folio);
-	}
-
-	return 0;
-}
-
-int ntfs_dev_write(struct super_block *sb, void *buf, loff_t start,
-			loff_t size, bool wait)
-{
-	pgoff_t idx, idx_end;
-	loff_t offset, end = start + size;
-	u32 from, to, buf_off = 0;
-	struct folio *folio;
-
-	idx = start >> PAGE_SHIFT;
-	idx_end = end >> PAGE_SHIFT;
-	from = start & ~PAGE_MASK;
-
-	if (idx == idx_end)
-		idx_end++;
-
-	for (; idx < idx_end; idx++, from = 0) {
-		folio = read_mapping_folio(sb->s_bdev->bd_mapping, idx, NULL);
-		if (IS_ERR(folio)) {
-			ntfs_error(sb, "Unable to read %ld page", idx);
-			return PTR_ERR(folio);
-		}
-
-		offset = (loff_t)idx << PAGE_SHIFT;
-		to = min_t(u32, end - offset, PAGE_SIZE);
-
-		memcpy_to_folio(folio, from, buf + buf_off, to);
-		buf_off += to;
-		folio_mark_uptodate(folio);
-		folio_mark_dirty(folio);
-		if (wait)
-			folio_wait_stable(folio);
-		folio_put(folio);
-	}
-
-	return 0;
-}
+const struct address_space_operations ntfs_mft_aops = {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 19, 0)
+	.read_folio		= ntfs_read_folio,
+#else
+	.readpage		= ntfs_readpage,
+#endif
+	.readahead		= ntfs_readahead,
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 0, 0)
+	.writepage		= ntfs_writepage,
+#endif
+	.writepages		= ntfs_mft_writepages,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+	.dirty_folio		= iomap_dirty_folio,
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	.dirty_folio		= filemap_dirty_folio,
+#else
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 18, 0)
+	.dirty_folio		= iomap_dirty_folio,
+#else
+	.set_page_dirty		= __set_page_dirty_nobuffers,
+#endif
+#endif
+#endif
+	.bmap			= ntfs_bmap,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 0, 0)
+	.migrate_folio		= filemap_migrate_folio,
+#else
+	.migratepage		= iomap_migrate_page,
+#endif
+	.is_partially_uptodate	= iomap_is_partially_uptodate,
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 8, 0)
+	.error_remove_folio	= generic_error_remove_folio,
+#else
+	.error_remove_page	= generic_error_remove_page,
+#endif
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 1, 0)
+	.release_folio		= iomap_release_folio,
+	.invalidate_folio	= iomap_invalidate_folio,
+#else
+	.releasepage		= iomap_releasepage,
+	.invalidatepage		= iomap_invalidatepage,
+#endif
+};

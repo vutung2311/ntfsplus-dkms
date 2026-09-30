@@ -1,0 +1,36 @@
+From: Tung Vu <vutung2311@gmail.com>
+Subject: [PATCH] ntfsplus: flush cluster and MFT bitmaps in ntfs_put_super()
+
+Earlier versions of this packaging repo replaced the ntfs_commit_inode()
+calls for $Bitmap and $MFT:$BITMAP with filemap_write_and_wait(), which
+flushed the bitmap pages but stopped committing the inodes' MFT records.
+Do both: write back and wait on the bitmap data first, then commit the
+inode as upstream does. Also tolerate a NULL inode, as the earlier
+version did.
+
+diff --git a/super.c b/super.c
+index 1396be5..6a6cf86 100644
+--- a/super.c
++++ b/super.c
+@@ -1834,13 +1834,19 @@ static void ntfs_put_super(struct super_block *sb)
+ 
+ 	ntfs_commit_inode(vol->root_ino);
+ 
+-	ntfs_commit_inode(vol->lcnbmp_ino);
++	if (vol->lcnbmp_ino) {
++		filemap_write_and_wait(vol->lcnbmp_ino->i_mapping);
++		ntfs_commit_inode(vol->lcnbmp_ino);
++	}
+ 
+ 	/*
+ 	 * the GFP_NOFS scope is not needed because ntfs_commit_inode
+ 	 * does nothing
+ 	 */
+-	ntfs_commit_inode(vol->mftbmp_ino);
++	if (vol->mftbmp_ino) {
++		filemap_write_and_wait(vol->mftbmp_ino->i_mapping);
++		ntfs_commit_inode(vol->mftbmp_ino);
++	}
+ 
+ 	if (vol->logfile_ino)
+ 		ntfs_commit_inode(vol->logfile_ino);

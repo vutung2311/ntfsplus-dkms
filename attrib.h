@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Defines for attribute handling in NTFS Linux kernel driver.
- * Part of the Linux-NTFS project.
  *
  * Copyright (c) 2001-2005 Anton Altaparmakov
  * Copyright (c) 2002 Richard Russon
@@ -16,11 +15,17 @@
 
 extern __le16 AT_UNNAMED[];
 
-/**
+/*
  * ntfs_attr_search_ctx - used in attribute search functions
- * @mrec:	buffer containing mft record to search
- * @attr:	attribute record in @mrec where to begin/continue search
- * @is_first:	if true ntfs_attr_lookup() begins search with @attr, else after
+ * @mrec: buffer containing mft record to search
+ * @mapped_mrec: true if @mrec was mapped by the search functions
+ * @attr: attribute record in @mrec where to begin/continue search
+ * @is_first: if true ntfs_attr_lookup() begins search with @attr, else after
+ * @ntfs_ino: Inode owning this attribute search
+ * @al_entry: Current attribute list entry
+ * @base_ntfs_ino: Base inode
+ * @mapped_base_mrec: true if @base_mrec was mapped by the search
+ * @base_attr: Base attribute record pointer
  *
  * Structure must be initialized to zero before the first call to one of the
  * attribute search functions. Initialize @mrec to point to the mft record to
@@ -66,6 +71,10 @@ int ntfs_attr_lookup(const __le32 type, const __le16 *name,
 		const u32 name_len, const u32 ic,
 		const s64 lowest_vcn, const u8 *val, const u32 val_len,
 		struct ntfs_attr_search_ctx *ctx);
+bool ntfs_attr_list_entry_is_valid(const struct attr_list_entry *ale,
+				   const u8 *al_end);
+bool ntfs_attr_list_is_valid(const u8 *al_start, s64 size);
+
 int load_attribute_list(struct ntfs_inode *base_ni,
 			       u8 *al_start, const s64 size);
 
@@ -103,7 +112,13 @@ int ntfs_non_resident_attr_punch_hole(struct ntfs_inode *ni, s64 start_vcn, s64 
 int __ntfs_attr_truncate_vfs(struct ntfs_inode *ni, const s64 newsize,
 		const s64 i_size);
 int ntfs_attr_expand(struct ntfs_inode *ni, const s64 newsize, const s64 prealloc_size);
+int ntfs_attr_expand_locked(struct ntfs_inode *ni, const s64 newsize,
+			    const s64 prealloc_size,
+			   struct ntfs_inode *locked_ni);
 int ntfs_attr_truncate_i(struct ntfs_inode *ni, const s64 newsize, unsigned int holes);
+int ntfs_attr_truncate_i_locked(struct ntfs_inode *ni, const s64 newsize,
+				unsigned int holes,
+			       struct ntfs_inode *locked_ni);
 int ntfs_attr_truncate(struct ntfs_inode *ni, const s64 newsize);
 int ntfs_attr_rm(struct ntfs_inode *ni);
 int ntfs_attr_exist(struct ntfs_inode *ni, const __le32 type, __le16 *name,
@@ -124,9 +139,12 @@ int ntfs_resident_attr_record_add(struct ntfs_inode *ni, __le32 type,
 		__le16 *name, u8 name_len, u8 *val, u32 size,
 		__le16 flags);
 int ntfs_attr_update_mapping_pairs(struct ntfs_inode *ni, s64 from_vcn);
+int ntfs_attr_update_mapping_pairs_locked(struct ntfs_inode *ni,
+					  s64 from_vcn,
+					 struct ntfs_inode *locked_ni);
 struct runlist_element *ntfs_attr_vcn_to_rl(struct ntfs_inode *ni, s64 vcn, s64 *lcn);
 
-/**
+/*
  * ntfs_attrs_walk - syntactic sugar for walking all attributes in an inode
  * @ctx:	initialised attribute search context
  *

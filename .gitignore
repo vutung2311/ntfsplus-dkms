@@ -1,5 +1,4 @@
 # makepkg generated directories and files
-linux-ntfs/
 pkg/
 src/
 *.pkg.tar.zst

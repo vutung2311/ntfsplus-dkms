@@ -1,7 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
  * Defines for mft record handling in NTFS Linux kernel driver.
- * Part of the Linux-NTFS project.
  *
  * Copyright (c) 2001-2004 Anton Altaparmakov
  */
@@ -26,7 +25,7 @@ static inline void unmap_extent_mft_record(struct ntfs_inode *ni)
 
 void __mark_mft_record_dirty(struct ntfs_inode *ni);
 
-/**
+/*
  * mark_mft_record_dirty - set the mft record and the page containing it dirty
  * @ni:		ntfs inode describing the mapped mft record
  *
@@ -43,11 +42,11 @@ static inline void mark_mft_record_dirty(struct ntfs_inode *ni)
 		__mark_mft_record_dirty(ni);
 }
 
-int ntfs_sync_mft_mirror(struct ntfs_volume *vol, const unsigned long mft_no,
+int ntfs_sync_mft_mirror(struct ntfs_volume *vol, const u64 mft_no,
 		struct mft_record *m);
 int write_mft_record_nolock(struct ntfs_inode *ni, struct mft_record *m, int sync);
 
-/**
+/*
  * write_mft_record - write out a mapped (extent) mft record
  * @ni:		ntfs inode describing the mapped (extent) mft record
  * @m:		mapped (extent) mft record to write
@@ -67,26 +66,39 @@ int write_mft_record_nolock(struct ntfs_inode *ni, struct mft_record *m, int syn
  */
 static inline int write_mft_record(struct ntfs_inode *ni, struct mft_record *m, int sync)
 {
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
 	struct folio *folio = ni->folio;
 	int err;
 
 	folio_lock(folio);
 	err = write_mft_record_nolock(ni, m, sync);
 	folio_unlock(folio);
+#else
+	struct page *page = ni->page;
+	int err;
+
+	BUG_ON(!page);
+	lock_page(page);
+	err = write_mft_record_nolock(ni, m, sync);
+	unlock_page(page);
+#endif
 
 	return err;
 }
 
-bool ntfs_may_write_mft_record(struct ntfs_volume *vol,
-		const unsigned long mft_no, const struct mft_record *m,
-		struct ntfs_inode **locked_ni);
 int ntfs_mft_record_alloc(struct ntfs_volume *vol, const int mode,
 		struct ntfs_inode **ni, struct ntfs_inode *base_ni,
-		struct mft_record **ni_mrec);
+		struct mft_record **ni_mrec, const s64 mft_data_vcn);
 int ntfs_mft_record_free(struct ntfs_volume *vol, struct ntfs_inode *ni);
 int ntfs_mft_records_write(const struct ntfs_volume *vol, const u64 mref,
 		const s64 count, struct mft_record *b);
 int ntfs_mft_record_check(const struct ntfs_volume *vol, struct mft_record *m,
-			  unsigned long mft_no);
-
+			  u64 mft_no);
+int ntfs_mft_writepages(struct address_space *mapping,
+		struct writeback_control *wbc);
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 6, 0)
+void ntfs_mft_mark_dirty(struct folio *folio);
+#else
+void ntfs_mft_mark_dirty(struct page *page);
+#endif
 #endif /* _LINUX_NTFS_MFT_H */
